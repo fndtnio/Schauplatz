@@ -4,6 +4,8 @@ An experiment: a tiny declarative language where 3D objects and spatial
 relations are first-class, built for humans and LLMs to reason about spaces
 together. The 3D view is only a projection — everything is in the code.
 
+**[Try the live demo →](https://fndtnio.github.io/Schauplatz/)**
+
 See [LANGUAGE.md](LANGUAGE.md) for the language spec and roadmap.
 
 ## Running
