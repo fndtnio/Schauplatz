@@ -354,6 +354,37 @@ test("at block: statements inside get the block's instant", () => {
   assert.match(c.results[1].text, /when in\(carol, monkey_island\) → 1:00–2:2/); // whole-timeline
 });
 
+test("at range block: duration facts — bare booleans become always+during", () => {
+  const c = compile(
+    "clock 1:00 minute(0.5)\n" +
+      "room cave size(4 2.5 4)\n" +
+      "room unknown size(4 2.5 4) at(-9 0 0)\n" +
+      "cylinder bob r(0.25) h(1.6) at(unknown)\n" +
+      "set people bob\n" +
+      "at 3:00 .. 3:15\n" +
+      "  walk bob to(cave 1 0) over(0)\n" + // anims anchor at the window START
+      "  check in(bob cave)\n" + // -> check always in(...) during(3:00 3:15)
+      "  check never in(people unknown) during(3:01 3:14)\n" + // explicit during wins
+      "  ? ever in(bob cave)\n" + // quantifier kept, window filled
+      "end\n" +
+      "walk bob to(unknown) start(3:15) over(0)",
+  );
+  assert.deepEqual(c.errors, []);
+  assert.match(c.results[0].text, /✓ check always in\(bob, cave\) during\(3:00 3:15\)/);
+  assert.match(c.results[1].text, /✓ check never in\(people, unknown\) during\(3:01 3:14\)/);
+  assert.match(c.results[2].text, /ever in\(bob, cave\) during\(3:00 3:15\) → true/);
+  assertNear(posAt(c, "bob", 60), [1, 0.8, 0]); // leapt at 3:00 (t=60)
+});
+
+test("at range block: guard rails", () => {
+  assert.match(errorsOf("at 2 .. 1\ncheck in(a b)\nend")[0], /two increasing times/);
+  assert.match(errorsOf("box a\nbox b\nat 1 .. 2\n? distance(a b)\nend")[0], /distance\(\) needs its own at\(time\)/);
+  // time names work as range endpoints
+  const c = compile("clock 1:00 minute(0.5)\ntime start_w 3:00\ntime end_w 3:15\nbox b\nat start_w .. end_w\nwalk b to(2 2) over(0)\nend");
+  assert.deepEqual(c.errors, []);
+  assertNear(posAt(c, "b", 60), [2, 0.5, 2]);
+});
+
 test("at block: guard rails", () => {
   assert.match(errorsOf("at 2\nbox b\nend")[0], /declare objects outside/);
   assert.match(errorsOf("at 2\ncheck in(a b)")[0], /at block is missing its end/);
@@ -759,7 +790,7 @@ test("view: recorded in compiled output; rendering-only, like theme", () => {
 test("theme errors: unknown name, duplicate, malformed", () => {
   assert.match(
     errorsOf("theme vaporwave\nbox b")[0],
-    /unknown theme "vaporwave" \(available: ink, clay, blueprint, noir, paper, rts\)/,
+    /unknown theme "vaporwave" \(available: ink, clay, blueprint, noir, paper, rts, snow\)/,
   );
   assert.match(errorsOf("theme ink\ntheme clay\nbox b")[0], /already "ink" \(line 1\)/);
   assert.match(errorsOf("theme\nbox b")[0], /expected: theme <name>/);
@@ -833,7 +864,7 @@ test("room errors: bad side, door too wide, overlapping doors, name collision", 
   assert.match(errorsOf("room k size(4 2 4) door(south 10)")[0], /doesn't fit/);
   assert.match(
     errorsOf("room k size(4 2 4) door(south 2 0) door(south 2 1)")[0],
-    /doors overlap/,
+    /openings overlap/,
   );
   assert.match(errorsOf("box k-north\nroom k")[0], /that name is taken/);
 });
@@ -891,7 +922,7 @@ test("door(to) errors: gap, non-room, short shared wall, rotation, unknown", () 
   assert.match(errorsOf("box b\nroom a door(to b)")[0], /"b" is not a room/);
   assert.match(
     errorsOf("room a size(4 2 4) door(south) repeat(2) spread(5 0 0)")[0],
-    /rooms with doors can't repeat yet/,
+    /rooms with doors or windows can.t repeat yet/,
   );
 });
 
@@ -1742,6 +1773,47 @@ test("set: repeat families are implicit sets — the stray-bolt debug", () => {
   assert.equal(c.errors.length, 1);
   assert.match(c.errors[0].msg, /✗ check never in\(bolt, cabin\)/);
   assert.match(c.results[1].text, /when in\(bolt, cabin\) → bolt-1 never; bolt-2 \d.*; bolt-3 never/); // the stray is NAMED
+});
+
+test("window: a y-band opening — sill and lintel stay, the band is open", () => {
+  const c = compile(
+    "room a size(4 2.8 4) window(to b 0.4 0.4 2.1)\n" +
+      "room b size(4 2.8 4) behind(a)\n" +
+      "sphere low_eye r(0.05) at(a 0 1)\n" +
+      "sphere low_tgt r(0.05) at(b 0 -1)\n" +
+      "sphere high_eye r(0.05) at(0 2.3 1)\n" + // at band height, in a
+      "sphere high_tgt r(0.05) at(0 2.3 -5.4)\n" + // at band height, in b
+      "? sees(low_eye low_tgt)\n" +
+      "? sees(high_eye high_tgt)\n" +
+      "? adjacent(a b)",
+  );
+  assert.deepEqual(c.errors, []);
+  const names = c.objects.map((o) => o.name);
+  assert.ok(names.includes("a-north-sill") && names.includes("a-north-lintel"));
+  assert.ok(names.includes("b-south-sill") && names.includes("b-south-lintel"));
+  const mk = c.objects.find((o) => o.name === "a-b-window");
+  assert.equal(mk.shape, "marker");
+  assertNear(mk.pos, [0, 2.3, -2.2]); // band center, on the shared plane
+  assert.equal(c.results[0].value, false); // ground-level sight: walls block
+  assert.equal(c.results[1].value, true); // band-height sight passes through
+  assert.equal(c.results[2].value, false); // a window is NOT adjacency
+});
+
+test("window: manual form, defaults, and guard rails", () => {
+  const c = compile("room c size(4 2.5 4) window(south 1.2 1 0.9)");
+  assert.deepEqual(c.errors, []);
+  const mk = c.objects.find((o) => o.name === "c-south-window");
+  assertNear(mk.pos, [0, 1.4, 2.1]); // sill 0.9 + h/2
+  assert.match(errorsOf("room r size(4 2.5 4) window(south 1 2 1)")[0], /doesn't fit a 2.5-high wall/);
+  assert.match(errorsOf("room r size(4 2.5 4) window(up 1)")[0], /first argument is a side/);
+  assert.match(
+    errorsOf("room r size(4 2.5 4) door(south 1) window(south 1 1 0.5)")[0],
+    /openings overlap/,
+  );
+  assert.match(
+    errorsOf("room a size(4 2.5 4) window(to b 0.4 0.4 2.3)\nroom b size(4 2.5 4) behind(a)")[0],
+    /doesn't fit a 2.5-high wall/,
+  );
 });
 
 test("adjacent: a static fact read off the door(to) graph", () => {

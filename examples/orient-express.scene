@@ -1,0 +1,152 @@
+// Murder on the Orient Express — Agatha Christie, 1934.
+// The Calais coach, the night in the snowdrift. Cast trimmed from
+// twelve to six; the geometry of the deduction is unchanged.
+//
+// Three beats, all derivable below:
+//   1. The planted watch (1:15) frames exactly one visitor.
+//   2. At the true moment of death the goals answer NO ONE COULD —
+//      when complete, consistent testimony proves a murder impossible,
+//      the testimony itself is the lie. (The same engine answer that
+//      flags a modeling bug in an honest scene is, here, the clue.)
+//   3. One when-query sweeps the window and lists every visit:
+//      the jury, with timestamps.
+//
+// The scenery outside the windows is Jeremy's puppet-box: cutouts
+// sliding past on a rail. They stop at 0:30 — the snowdrift. A stuck
+// train is Poirot's first fact: nobody left across the snow, so the
+// murderer is still aboard.
+
+theme snow
+clock 0:00 minute(0.15)
+time watch_time 1:15      // the smashed watch — planted
+time time_of_death 1:30   // the truth, between visits
+
+// --- the Calais coach: seven compartments and the corridor ------------
+room poirot_cabin size(2.2 2.5 2) at(-7.8 0 0) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room ratchett_cabin size(2.2 2.5 2) right-of(poirot_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room hubbard_cabin size(2.2 2.5 2) right-of(ratchett_cabin) color(#31415e) door(to corridor) door(to ratchett_cabin 0.7) window(north 1.1 0.9 0.9)
+room macqueen_cabin size(2.2 2.5 2) right-of(hubbard_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room arbuthnot_cabin size(2.2 2.5 2) right-of(macqueen_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room mary_cabin size(2.2 2.5 2) right-of(arbuthnot_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room princess_cabin size(2.2 2.5 2) right-of(mary_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room corridor size(18.2 2.5 1.4) at(0 0 2.1) color(#31415e) window(south 14 0.9 0.9)
+
+// --- the passengers ----------------------------------------------------
+cylinder poirot r(0.26) h(1.65) at(poirot_cabin 0 0.4) color(#8a8d94)
+box bed size(0.9 0.25 1.8) at(ratchett_cabin -0.5 0) color(#4a4f5a)
+cylinder ratchett r(0.24) h(1.7) at(-5.7 0.42 0) rotate(90 0 0) color(#9a6a5a)  // drugged, in his bunk
+cylinder hubbard r(0.26) h(1.6) at(hubbard_cabin 0 0.4) color(#b98a1d)
+cylinder macqueen r(0.25) h(1.75) at(macqueen_cabin 0 0.4) color(#3d7fa6)
+cylinder arbuthnot r(0.26) h(1.8) at(arbuthnot_cabin 0 0.4) color(#1f7a6d)
+cylinder mary r(0.24) h(1.65) at(mary_cabin 0 0.4) color(#c8451f)
+cylinder princess r(0.23) h(1.55) at(princess_cabin 0 0.4) color(#7a5a8a)
+cylinder michel r(0.25) h(1.7) at(corridor -8.2 0) color(#5b8dd9)  // the conductor
+
+set people poirot ratchett hubbard macqueen arbuthnot mary princess michel
+set suspects hubbard macqueen arbuthnot mary princess michel
+
+box knife size(0.35 0.08 0.12) at(ratchett_cabin 0.7 -0.6) color(#aab2c0)
+
+// --- the puppet-box: the world going by --------------------------------
+// cutouts on a rail north of the train; one long slide, then the
+// snowdrift stops everything at 0:30. Clouds keep drifting — snow
+// stops trains, not sky.
+part tree
+  cylinder trunk r(0.12) h(1.4) at(0 0.7 0) color(#4a3f35)
+  sphere crown r(0.6) at(0 1.7 0) color(#2e4438)
+end
+tree trees at(14 0 -4.6) repeat(7) spread(-4.2 0 0)
+move trees by(-22 0 0) start(0:00) over(30m)
+cylinder pole r(0.06) h(2.4) at(12 1.2 -3.4) color(#3a3f4a) repeat(9) spread(-3.1 0 0)
+move pole by(-22 0 0) start(0:00) over(30m)
+sphere cloud r(0.9) at(10 4.5 -6.5) color(#4a4f5e) repeat(4) spread(-6.5 0.4 -0.6)
+move cloud by(-9 0 0) start(0:00) over(150m)
+
+// --- the night ----------------------------------------------------------
+// 0:30 — the snowdrift (the scenery halts above; the train is stuck)
+
+// 0:37 — the voice: "Ce n'est rien. Je me suis trompé." Ratchett spoke
+// no French. Someone else was in that compartment.
+walk macqueen to(ratchett_cabin 0.6 0.6) start(0:36) over(0)
+at 0:37
+  check in(people ratchett_cabin) except(ratchett)
+end
+walk macqueen to(macqueen_cabin 0 0.4) start(0:39) over(0)
+
+// 1:15–2:00 — the procession: one by one, through Mrs. Hubbard's
+// communicating door. Each visit is a range block; each stroke darkens
+// the dead man. Death lands at 1:30 — in the GAP between visits.
+at 1:14 .. 1:21
+  walk hubbard to(ratchett_cabin 0.6 0.5) over(0)
+  check in(hubbard ratchett_cabin)
+end
+walk hubbard to(hubbard_cabin 0 0.4) start(1:21) over(0)
+paint ratchett to(#8a5a4e) start(1:18)
+
+at 1:22 .. 1:28
+  walk princess to(ratchett_cabin 0.6 0.5) over(0)
+  check in(princess ratchett_cabin)
+end
+walk princess to(princess_cabin 0 0.4) start(1:28) over(0)
+paint ratchett to(#7a4e44) start(1:25)
+
+at 1:32 .. 1:38
+  walk arbuthnot to(ratchett_cabin 0.6 0.5) over(0)
+  check in(arbuthnot ratchett_cabin)
+end
+walk arbuthnot to(arbuthnot_cabin 0 0.4) start(1:38) over(0)
+paint ratchett to(#6a423a) start(1:35)
+
+at 1:39 .. 1:45
+  walk mary to(ratchett_cabin 0.6 0.5) over(0)
+  check in(mary ratchett_cabin)
+end
+walk mary to(mary_cabin 0 0.4) start(1:45) over(0)
+paint ratchett to(#583832) start(1:42)
+
+at 1:46 .. 1:52
+  walk macqueen to(ratchett_cabin 0.6 0.5) over(0)
+  check in(macqueen ratchett_cabin)
+end
+walk macqueen to(macqueen_cabin 0 0.4) start(1:52) over(0)
+paint ratchett to(#452c28) start(1:49)
+
+at 1:53 .. 1:59
+  walk michel to(ratchett_cabin 0.6 0.5) over(0)
+  check in(michel ratchett_cabin)
+end
+walk michel to(corridor -8.2 0) start(1:59) over(0)
+paint ratchett to(#32201e) start(1:56)
+
+// 2:00 — the knife planted in Mrs. Hubbard's sponge-bag
+walk knife to(hubbard_cabin 0.7 -0.6) start(2:00) over(0)
+check always in(knife hubbard_cabin) during(2:00 2:30)
+
+// --- morning: everyone innocent in their beds ---------------------------
+check always in(hubbard hubbard_cabin) during(1:21 2:30)
+check always in(princess princess_cabin) during(1:28 2:30)
+check always in(arbuthnot arbuthnot_cabin) during(1:38 2:30)
+check always in(mary mary_cabin) during(1:45 2:30)
+check always in(macqueen macqueen_cabin) during(1:52 2:30)
+check always in(michel corridor) during(1:59 2:30)
+check always in(poirot poirot_cabin) during(0:00 2:30)   // he heard; he never left
+
+// --- Poirot -------------------------------------------------------------
+check adjacent(hubbard_cabin ratchett_cabin)   // the communicating door: the route
+? adjacent(poirot_cabin ratchett_cabin)        // no door — Poirot heard through the wall
+
+// their testimony, one lie per line: "I never left my compartment."
+// always → false, and the failing range IS the visit.
+? always in(hubbard hubbard_cabin)
+? always in(princess princess_cabin)
+? always in(arbuthnot arbuthnot_cabin)
+? always in(mary mary_cabin)
+? always in(macqueen macqueen_cabin)
+? always in(michel corridor)
+
+// beat 1 — the planted watch frames exactly one:
+?- sole(suspects, X, ratchett_cabin, watch_time)
+// beat 2 — at the true moment, NOBODY could have (the conspiracy tell):
+?- could(suspects, X, ratchett_cabin, time_of_death)
+// beat 3 — instants can be planted; the sweep cannot. The jury:
+? when in(suspects ratchett_cabin) during(1:00 2:10)

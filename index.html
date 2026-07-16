@@ -59,6 +59,10 @@
   .cm-s-material-darker .CodeMirror-gutters { background: var(--bg); border-right: 1px solid var(--border); }
   .cm-s-material-darker span.cm-comment { color: #8a93a5; } /* theme default is too dark against --bg */
   .cm-errorLine { background: rgba(224, 115, 111, 0.13) !important; }
+  .cm-jumpFlash { background: rgba(91, 141, 217, 0.28) !important; }
+  #output [data-line]:not([data-line=""]) { cursor: pointer; }
+  #output .lineref { color: var(--dim); font-size: 11px; }
+  #output .goal-warn { color: #d9a23f; }
 
   #output {
     flex: none; max-height: 32%; overflow-y: auto;
@@ -418,9 +422,13 @@ function recompile() {
   errorLines = latest.errors.map((e) => e.line - 1);
   errorLines.forEach((l) => editor.addLineClass(l, "background", "cm-errorLine"));
 
-  const parts = [`<div id="result-lines"></div><div id="goal-lines"></div>`];
+  const parts = [`<div id="result-lines"></div><div id="goal-lines"></div><div id="gap-lines"></div>`];
+  // failing checks already appear in the results with their line number —
+  // repeating them here would list every failure twice
+  const shownAsResults = new Set(latest.results.map((r) => r.text));
   for (const e of latest.errors) {
-    parts.push(`<div class="error">line ${e.line}: ${e.msg}</div>`);
+    if (shownAsResults.has(e.msg)) continue;
+    parts.push(`<div class="error" data-line="${e.line}">line ${e.line}: ${e.msg}</div>`);
   }
   output.innerHTML = parts.join("");
   // an embed with nothing to say shouldn't float an empty box
@@ -430,6 +438,7 @@ function recompile() {
   );
   renderResults(latest.results);
   runGoals(latest);
+  renderGaps();
   if (!factsOverlay.hidden) renderFacts(); // keep the facts view live while editing
 
   if (window.onCompiled) window.onCompiled(latest);
@@ -439,8 +448,89 @@ function renderResults(results) {
   const el = document.getElementById("result-lines");
   if (!el) return;
   el.innerHTML = results
-    .map((r) => `<div class="${r.error ? "error" : "result"}">${r.check ? "" : "? "}${r.text}</div>`)
+    .map(
+      (r) =>
+        `<div class="${r.error ? "error" : "result"}" data-line="${r.line || ""}">` +
+        `${r.check ? "" : "? "}${r.text}` +
+        `${r.error && r.line ? ` <span class="lineref">· line ${r.line}</span>` : ""}</div>`,
+    )
     .join("");
+}
+
+// any output row that knows its line jumps the editor there on click
+output.addEventListener("click", (e) => {
+  const row = e.target.closest("[data-line]");
+  if (!row || !row.dataset.line || document.body.classList.contains("no-editor")) return;
+  const ln = parseInt(row.dataset.line, 10) - 1;
+  editor.setCursor({ line: ln, ch: 0 });
+  editor.scrollIntoView({ line: ln, ch: 0 }, 80);
+  editor.focus();
+  editor.addLineClass(ln, "background", "cm-jumpFlash");
+  setTimeout(() => editor.removeLineClass(ln, "background", "cm-jumpFlash"), 800);
+});
+
+// ------------------------------------------- assumption surfacing (gaps)
+// People persist where you park them — and that persistence is a CLAIM.
+// Surface any trailing stay (someone arrives somewhere mid-story and
+// never moves again) that no check about them covers: the language
+// should point you at the places where you don't know. Like rules.pl,
+// this lint knows the convention: a trailing stay in `unknown` is an
+// honest "unaccounted", not a claim. It reminds; it never acts.
+function renderGaps() {
+  const el = document.getElementById("gap-lines");
+  if (!el) return;
+  const f = latest.facts;
+  if (!f || !f.whereabouts || !f.whereabouts.length) { el.innerHTML = ""; return; }
+  const H = f.duration;
+  const fmtT = (t) => {
+    const ck = latest.clock;
+    if (!ck) return (Math.round(t * 100) / 100).toFixed(2);
+    const totalMin = ck.start + t / ck.minute;
+    let h = Math.floor(totalMin / 60);
+    let m = Math.floor(totalMin - h * 60);
+    let s = Math.round((totalMin - h * 60 - m) * 60);
+    if (s === 60) { s = 0; m += 1; }
+    if (m === 60) { m = 0; h += 1; }
+    return `${h}:${String(m).padStart(2, "0")}` + (s ? `:${String(s).padStart(2, "0")}` : "");
+  };
+  // effective window of every check that names a thing (or a set it's in)
+  const windows = new Map();
+  for (const q of latest.queries || []) {
+    if (!q.check) continue;
+    const win = q.at !== null ? [q.at, q.at] : q.during ? q.during : [0, H];
+    for (const arg of q.args) {
+      const names = latest.sets && latest.sets.has(arg) ? latest.sets.get(arg) : [arg];
+      for (const nm of names) {
+        if (!windows.has(nm)) windows.set(nm, []);
+        windows.get(nm).push(win);
+      }
+    }
+  }
+  const lines = [];
+  for (const w of f.whereabouts) {
+    if (w.room === "unknown") continue;
+    for (const [t0, t1] of w.ranges) {
+      if (t1 < H - 1e-6 || t0 <= 1e-9) continue; // only trailing stays that began mid-story
+      // coverage frontier: how far the person's check windows reach into
+      // the stay — anything past the frontier is unattested persistence
+      const wins = (windows.get(w.name) || []).slice().sort((a, b) => a[0] - b[0]);
+      let frontier = t0;
+      let moved = true;
+      while (moved) {
+        moved = false;
+        for (const [a, b] of wins) {
+          if (a <= frontier + 1e-6 && b > frontier) { frontier = b; moved = true; }
+        }
+      }
+      if (frontier < H - 1e-6) {
+        const since = frontier > t0 ? fmtT(frontier) : fmtT(t0);
+        lines.push(
+          `<div class="goal-warn">⚠ ${w.name} stays in ${w.room} after ${since} with no check covering it — known, or unaccounted? (if unaccounted, leap them to unknown)</div>`,
+        );
+      }
+    }
+  }
+  el.innerHTML = lines.join("");
 }
 
 // ------------------------------------------------- goals: the rules layer
@@ -460,7 +550,24 @@ function runGoals(compiled) {
   const goals = compiled.goals || [];
   const gen = ++goalGen;
   if (!goals.length) { el.innerHTML = ""; return; }
-  const line = (g, text, cls) => `<div class="${cls || "goal"}">?- ${g.goal} ${text}</div>`;
+
+  // goal lint: a misspelled atom doesn't error, it just answers "no" —
+  // flag any atom that matches nothing in the scene or the rules
+  const vocab = new Set(["true", "fail", "false", "not", "inf", "nan"]);
+  for (const o of compiled.objects || []) vocab.add(o.name);
+  if (compiled.sets) for (const [s, members] of compiled.sets) { vocab.add(s); members.forEach((m) => vocab.add(m)); }
+  if (compiled.times) for (const n of compiled.times.keys()) vocab.add(n);
+  if (rulesText) for (const m of rulesText.matchAll(/^([a-z][A-Za-z0-9_]*)\(/gm)) vocab.add(m[1]);
+  const lintOf = (g) => {
+    if (!rulesText) return "";
+    const toks = g.goal.match(/'[^']*'|\b[a-z][A-Za-z0-9_]*/g) || []; // \b: don't match the tail of a Variable
+    const unknown = [...new Set(toks.map((t) => t.replace(/^'|'$/g, "")).filter((t) => !vocab.has(t)))];
+    return unknown.length
+      ? ` <span class="goal-warn">⚠ "${unknown.join('", "')}" matches nothing in the scene or rules</span>`
+      : "";
+  };
+  const line = (g, text, cls) =>
+    `<div class="${cls || "goal"}" data-line="${g.line}">?- ${g.goal} ${text}${lintOf(g)}</div>`;
   if (typeof pl === "undefined") {
     el.innerHTML = goals.map((g) => line(g, "— Prolog engine unavailable (CDN)", "error")).join("");
     return;
@@ -672,15 +779,38 @@ const SCENE_THEMES = {
   // one hard raking light, long shadows, near-black room, muted colors —
   // plus a cool moonlight rim from the far side so dark faces still read
   noir: {
-    bg: 0x0b0b0e,
-    hemi: { sky: 0x46506a, ground: 0x0c0d10, intensity: 0.55 },
-    sun: { color: 0xfff2dc, intensity: 2.6, pos: [10, 3.5, 2] },
-    rim: { color: 0x8fa3cc, intensity: 0.9, pos: [-8, 6, -6] },
-    grid: { big: 0x1d2027, small: 0x14161b },
-    shadowOpacity: 0.65,
+    bg: 0x0d0e12,
+    ground: 0x4b505e, // an opaque LIT floor: room interiors are shaped by light, not swallowed by bg
+    // the hard raking sun is the look; the hemisphere is what reaches
+    // INTO rooms from above (dollhouse view has no ceilings) — keep the
+    // key low and dramatic, but let the sky fill interiors
+    hemi: { sky: 0x8497b8, ground: 0x2a2d36, intensity: 1.6 },
+    sun: { color: 0xfff2dc, intensity: 2.6, pos: [10, 4.5, 2] },
+    rim: { color: 0x8fa3cc, intensity: 1.2, pos: [-8, 7, -6] },
+    grid: { big: 0x232733, small: 0x171a21 },
+    // room interiors are entirely sun-shadowed (light enters only by
+    // the doors) — heavy shadow blacks out every floor indoors
+    shadowOpacity: 0.22,
     palette: ["#8a8d94", "#6e7178", "#9a9489", "#7d8087", "#8f8a80", "#767a80"],
     material: (color, o) =>
       new THREE.MeshStandardMaterial({ color, roughness: 0.5, flatShading: !!o.sides }),
+    outline: 0,
+    edges: null,
+  },
+  // overcast winter: a lit white snowfield (the opaque-ground capability
+  // built for noir, turned all the way up), soft cold light from
+  // everywhere, blue-grey shadows, muted woolen palette
+  snow: {
+    bg: 0xc7d2e0,
+    ground: 0xedf1f6,
+    hemi: { sky: 0xffffff, ground: 0xdbe3ee, intensity: 1.25 },
+    sun: { color: 0xe9f0fc, intensity: 1.1, pos: [5, 11, 4] },
+    rim: { color: 0xbcc9dd, intensity: 0.5, pos: [-7, 8, -5] },
+    grid: { big: 0xb4c0d1, small: 0xd3dce8 },
+    shadowOpacity: 0.18, // unused while ground is opaque; kept for symmetry
+    palette: ["#4a5a75", "#7a4a45", "#3f6a5a", "#8a7040", "#5d4a6b", "#496b7d"],
+    material: (color, o) =>
+      new THREE.MeshStandardMaterial({ color, roughness: 0.75, flatShading: !!o.sides }),
     outline: 0,
     edges: null,
   },
@@ -705,6 +835,7 @@ const ground = new THREE.Mesh(
   new THREE.ShadowMaterial({ opacity: 0.3 }),
 );
 ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.02; // below the grid so an opaque floor doesn't z-fight it
 ground.receiveShadow = true;
 scene.add(ground);
 
@@ -714,6 +845,13 @@ function applyEnvironment(name) {
   currentThemeName = name;
   const t = SCENE_THEMES[name];
   scene.background = new THREE.Color(t.bg);
+  // a theme with `ground` gets an OPAQUE, LIT floor — in dark themes a
+  // transparent shadow-catcher leaves room interiors as raw background,
+  // which no light can ever reach
+  ground.material.dispose();
+  ground.material = t.ground
+    ? new THREE.MeshStandardMaterial({ color: t.ground, roughness: 0.95 })
+    : new THREE.ShadowMaterial({ opacity: t.shadowOpacity });
   hemi.color.set(t.hemi.sky);
   hemi.groundColor.set(t.hemi.ground);
   hemi.intensity = t.hemi.intensity;
@@ -727,8 +865,10 @@ function applyEnvironment(name) {
   } else {
     rim.intensity = 0;
   }
-  ground.material.opacity = t.shadowOpacity;
-  ground.material.color.set(t.shadowColor || 0x000000); // paper prints shadows in ink
+  if (!t.ground) {
+    ground.material.opacity = t.shadowOpacity;
+    ground.material.color.set(t.shadowColor || 0x000000); // paper prints shadows in ink
+  }
   if (grid) {
     scene.remove(grid);
     grid.geometry.dispose();

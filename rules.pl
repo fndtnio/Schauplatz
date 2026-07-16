@@ -34,6 +34,18 @@ could(Set, X, R, TN) :-
     could_be_at(X, R, T),
     \+ alibi(X, R, T).
 
+% The eliminations — who is CLEARED for room R at named time TN, and
+% where their alibi places them. cleared/5 and could/4 partition the
+% set: every member is one or the other. The case-file pattern:
+%   ?- cleared(suspects, X, beach_hut, time_of_death, Where)
+%   ?- could(suspects, X, beach_hut, time_of_death)
+%   ?- sole(suspects, X, beach_hut, time_of_death)
+cleared(Set, X, R, TN, Where) :-
+    time_fact(TN, T),
+    set_member(Set, X),
+    present_at(X, Where, T),
+    Where \= R, Where \= unknown.
+
 % The verdict: exactly one member of the set lacks an alibi.
 %   ?- sole(suspects, X, lion_enclosure, time_of_death)
 sole(Set, X, R, TN) :-

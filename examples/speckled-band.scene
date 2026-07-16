@@ -1,0 +1,82 @@
+// The Adventure of the Speckled Band — Conan Doyle, 1892.
+// Stoke Moran, the night of Holmes and Watson's watch, ~3 AM.
+//
+// Holmes solved this one with geometry: a ventilator that opens into
+// the NEXT ROOM instead of the outside air, a bell-rope that rings no
+// bell hanging from it to the pillow, and a bed clamped to the floor
+// so it can never move away from the rope. The vent is a window(to) —
+// a y-band opening high in the shared wall: not a door, not adjacency,
+// but sight and small things pass. The rope is a link. The speckled
+// band is a swamp adder. The shutters are closed for the night (no
+// lawn windows modeled): the room is sealed to anything that WALKS.
+
+theme noir
+clock 3:00 minute(0.5)
+time time_of_death 3:16
+
+// three bedrooms in a row, doors onto the corridor — and the vent,
+// declared from Roylott's side (he had it built)
+room roylott_room size(4 2.8 4) at(-4.4 0 0) color(#6a5a4a) door(to corridor) window(to julia_room 0.35 0.35 2.1)
+room julia_room size(4 2.8 4) right-of(roylott_room) door(to corridor)
+room helen_room size(4 2.8 4) right-of(julia_room) door(to corridor)
+room corridor size(13.2 2.8 2) at(0 0 3.4) color(#4a4f5a)
+
+// Julia's room: the bed is clamped to the floor beside the shared wall
+// (it CANNOT move away from what hangs above it), and the dummy
+// bell-rope runs from the ventilator down to the pillow — a link, so
+// it spans vent and bed exactly, always
+box bed size(1 0.5 2) at(julia_room -1.4 0) color(#7a7f8a)
+link bell_rope between(roylott_room-julia_room-window bed) r(0.02) color(#8a6a3a)
+
+// Roylott's room: the safe the band lives in, the saucer of milk, and
+// the man himself
+box safe size(0.6 0.9 0.5) at(roylott_room -1.2 -1.2) color(#3a3f4a)
+cylinder saucer r(0.12) h(0.04) at(roylott_room -0.6 -1.2) color(#c8c8c8)
+cylinder roylott r(0.28) h(1.8) at(roylott_room 1 1) color(#8a4a3a)
+
+// the night watch: Holmes and Watson in the dark of Julia's room;
+// Helen safely in her old room
+cylinder holmes r(0.25) h(1.8) at(julia_room 1.2 -1) color(#3d7fa6)
+cylinder watson r(0.25) h(1.7) at(julia_room 1.4 0.6) color(#1f7a6d)
+cylinder helen r(0.24) h(1.65) at(helen_room 0 0) color(#b98a1d)
+
+set people roylott holmes watson helen
+set suspects roylott
+
+// the speckled band: starts on the safe
+sphere band r(0.09) on(safe) color(#b8973f)
+
+// --- the night, minute by minute ---------------------------------------
+// 3:05  Roylott sends the band up to the ventilator
+move band to(roylott_room-julia_room-window) start(3:05) over(2m) ease(in-out)
+// 3:07  through the vent, down the rope, onto the bed
+move band to(bed 0 0.3 0) start(3:07) over(2m) ease(out)
+// 3:12  Holmes strikes at it in the dark — it turns
+paint band to(#c2453a) start(3:12)
+// 3:13  back up the rope, through the vent...
+move band to(roylott_room-julia_room-window) start(3:13) over(1m) ease(in)
+// 3:14  ...and down onto the man who sent it
+move band to(roylott 0.4 -0.7 0) start(3:14) over(1m) ease(out)
+check always in(band roylott_room) during(3:15 3:17)
+// 3:16  "the speckled band" — Roylott falls
+turn roylott to(0 0 90) start(time_of_death) over(0.5m) ease(in)
+
+// --- Holmes's geometry, as facts the scene will vouch for --------------
+check adjacent(julia_room corridor)        // the door the world uses
+? adjacent(julia_room roylott_room)        // false: NO door joins these rooms
+check never in(roylott julia_room)         // Roylott never sets foot in it
+check ever overlaps(band bed)              // ...yet the band reaches the bed
+check ever in(band roylott_room)           // it starts on his side of the wall
+check ever in(band julia_room)             // and crosses where nothing walks
+check in(holmes julia_room) at(3:12)       // the witnesses, in place
+check in(watson julia_room) at(3:12)
+check never in(helen julia_room)           // Helen was never in danger
+
+// --- the locked-room theorem --------------------------------------------
+// Ask the alibi rules who could have been with the victim... and watch
+// them CLEAR the murderer: Roylott is provably in his own room at the
+// moment of death, because the weapon crossed the wall without him.
+// Geometry alone cannot convict a remote weapon — who HELD what is the
+// missing fact type, and the next frontier.
+?- cleared(suspects, X, julia_room, time_of_death, Where)
+?- could(suspects, X, julia_room, time_of_death)

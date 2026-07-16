@@ -39,6 +39,8 @@ end
 walk bob to(aviary 1 0) start(2:30) over(0)
 check in(bob aviary) at(2:30)
 
-// the derivation: who could have been with alice, and is it one person?
+// the derivation, as a case file: the eliminations (with each alibi
+// named), the remaining candidates, and the verdict
+?- cleared(suspects, X, lion_enclosure, time_of_death, Where)
 ?- could(suspects, X, lion_enclosure, time_of_death)
 ?- sole(suspects, X, lion_enclosure, time_of_death)

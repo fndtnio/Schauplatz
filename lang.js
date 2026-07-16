@@ -28,7 +28,7 @@
   // Themes are a whole-scene rendering hint: zero semantic effect (bounds,
   // sight lines, and queries ignore them). The core only validates the name
   // and passes it through; renderers decide what a theme looks like.
-  const THEMES = new Set(["ink", "clay", "blueprint", "noir", "paper", "rts"]);
+  const THEMES = new Set(["ink", "clay", "blueprint", "noir", "paper", "rts", "snow"]);
 
   // Like themes, views are a whole-scene rendering hint with zero semantic
   // effect: the projection and starting vantage the scene asks for.
@@ -249,32 +249,42 @@
       if (inPart[i] || !line) return;
       const lineNo = i + 1;
 
-      // at <time> ... end — a TIME BLOCK: statements inside get the
-      // block's instant where they didn't state their own (explicit
-      // start/at/during always wins). Pure desugar: afterwards every
-      // statement stands alone, and order still means nothing.
+      // at <time> ... end / at <t0> .. <t1> ... end — TIME BLOCKS.
+      // The instant form scopes MOMENT facts, the range form DURATION
+      // facts: statements inside get the block's time where they didn't
+      // state their own (explicit start/at/during always wins). Pure
+      // desugar: afterwards every statement stands alone, and order
+      // still means nothing.
       if (/^at\b/.test(line)) {
         if (block) {
           errors.push({ line: lineNo, msg: `at blocks don't nest (block open since line ${block.line})` });
           return;
         }
-        const m = line.match(/^at\s+(\S+)$/);
+        const m = line.match(/^at\s+(\S+?)(?:\s*\.\.\s*(\S+))?$/);
         if (!m) {
-          errors.push({ line: lineNo, msg: "expected: at <time> ... end — e.g. at 2:15" });
+          errors.push({ line: lineNo, msg: "expected: at <time> ... end, or at <t0> .. <t1> ... end" });
           return;
         }
         let bad = false;
-        const w = wallTime(m[1], timeCtx, (msg) => {
-          errors.push({ line: lineNo, msg: `at: ${msg}` });
-          bad = true;
-        });
+        const resolve = (tok) => {
+          const w = wallTime(tok, timeCtx, (msg) => {
+            errors.push({ line: lineNo, msg: `at: ${msg}` });
+            bad = true;
+          });
+          return w !== null ? w : num(tok);
+        };
+        const t0 = resolve(m[1]);
+        const t1 = m[2] !== undefined ? resolve(m[2]) : null;
         if (bad) return;
-        const t = w !== null ? w : num(m[1]);
-        if (t === null || t < 0) {
+        if (t0 === null || t0 < 0 || (m[2] !== undefined && t1 === null)) {
           errors.push({ line: lineNo, msg: "at: expected a time >= 0 (h:mm, seconds, or a time name)" });
           return;
         }
-        block = { t, line: lineNo };
+        if (t1 !== null && t1 <= t0) {
+          errors.push({ line: lineNo, msg: "at: a range needs two increasing times — at 3:00 .. 3:15" });
+          return;
+        }
+        block = { t0, t1, line: lineNo };
         return;
       }
       if (line === "end") {
@@ -283,7 +293,7 @@
         block = null;
         return;
       }
-      const blockAt = block ? block.t : null;
+      const blockAt = block ? { t0: block.t0, t1: block.t1 } : null;
 
       // ?- goal(Args) — a question for the RULES LAYER. The core carries
       // it as data (compiled.goals); evaluation happens wherever an
@@ -561,10 +571,12 @@
     if (a.start !== null && a.after !== null) {
       return err("use start(t) or after(s), not both");
     }
-    // inside an at block: fill the block's instant where the statement
-    // stated no time of its own — explicit start/after always wins
+    // inside an at block: fill the block's time where the statement
+    // stated no time of its own — explicit start/after always wins.
+    // A range block anchors anims at its START (the window scopes what
+    // holds; movement that establishes it begins as the window opens).
     if (blockAt != null && a.start === null && a.after === null) {
-      a.start = blockAt;
+      a.start = blockAt.t0;
     }
     anims.push(a);
   }
@@ -583,7 +595,7 @@
           : "bad query — expected: ? name(a b) or ? ever name(a b)",
       );
     }
-    const [, quant, fn, rawArgs, trailing] = m;
+    let [, quant, fn, rawArgs, trailing] = m; // quant may be defaulted by a range block
     if (!QUERIES.has(fn)) {
       return err(`unknown query "${fn}" (available: ${[...QUERIES].join(", ")})`);
     }
@@ -628,12 +640,23 @@
       }
     }
 
-    // inside an at block: fill the block's instant where the query stated
-    // no time scope of its own. A quantifier IS a time scope (so ever/
-    // always/when keep their own timeline; never combines, as instant
-    // negation), and adjacent has no time at all.
-    if (blockAt != null && fn !== "adjacent" && at === null && during === null && (!quant || quant === "never")) {
-      at = blockAt;
+    // inside an at block: fill the block's time where the query stated
+    // no time scope of its own (adjacent has no time at all).
+    // Instant block: fills at(); a quantifier IS a time scope, so ever/
+    // always/when keep their own timeline (never combines, as instant
+    // negation). Range block: fills during(); a BARE boolean reads as a
+    // duration fact — "held throughout" — so it defaults to always.
+    if (blockAt != null && fn !== "adjacent" && at === null && during === null) {
+      if (blockAt.t1 === null) {
+        if (!quant || quant === "never") at = blockAt.t0;
+      } else if (quant) {
+        during = [blockAt.t0, blockAt.t1];
+      } else if (BOOLEAN_QUERIES.has(fn)) {
+        quant = "always";
+        during = [blockAt.t0, blockAt.t1];
+      } else {
+        return err(`inside an at-range block, ${fn}() needs its own at(time)`);
+      }
     }
 
     if (fn === "adjacent") {
@@ -847,7 +870,15 @@
                 k, ds.map((d) => ({ width: d.width * s, offset: d.offset * s })),
               ]),
             ),
-            autos: o.room.autos.map((a) => ({ ...a, width: a.width * s })),
+            windows: Object.fromEntries(
+              Object.entries(o.room.windows).map(([k, ws]) => [
+                k, ws.map((w) => ({ width: w.width * s, height: w.height * s, sill: w.sill * s, offset: w.offset * s })),
+              ]),
+            ),
+            autos: o.room.autos.map((a) => ({
+              ...a, width: a.width * s,
+              ...(a.kind === "window" ? { height: a.height * s, sill: a.sill * s } : {}),
+            })),
           };
         }
       }
@@ -950,7 +981,8 @@
     let thick = 0.2;
     let color = "#5b6575";
     const doors = { north: [], south: [], east: [], west: [] };
-    const autos = []; // door(to <room>): carved after positions resolve
+    const windows = { north: [], south: [], east: [], west: [] };
+    const autos = []; // door(to)/window(to): carved after positions resolve
 
     for (const p of props) {
       switch (p.key) {
@@ -983,7 +1015,7 @@
             if (!target || num(target) !== null || rest.length > 2 || width === null || width <= 0) {
               return err("door(): expected door(to <room>) or door(to <room> <width>)");
             }
-            autos.push({ target, width, line: lineNo });
+            autos.push({ kind: "door", target, width, line: lineNo });
             break;
           }
           if (!(side in doors)) {
@@ -995,6 +1027,37 @@
             return err("door(): expected door(side width? offset?)");
           }
           doors[side].push({ width, offset });
+          break;
+        }
+        case "window": {
+          // a WINDOW is a y-band opening: wall below (sill) and above
+          // (lintel) stay; sight, air — and snakes — pass through.
+          // window(side w? h? sill? offset?) or window(to <room> w? h? sill?)
+          const [side, ...rest] = p.args;
+          if (side === "to") {
+            const target = rest[0];
+            const w = rest.length > 1 ? num(rest[1]) : 0.8;
+            const wh = rest.length > 2 ? num(rest[2]) : 0.8;
+            const sill = rest.length > 3 ? num(rest[3]) : 1;
+            if (!target || num(target) !== null || rest.length > 4 ||
+                w === null || w <= 0 || wh === null || wh <= 0 || sill === null || sill < 0) {
+              return err("window(): expected window(to <room> width? height? sill?)");
+            }
+            autos.push({ kind: "window", target, width: w, height: wh, sill, line: lineNo });
+            break;
+          }
+          if (!(side in windows)) {
+            return err("window(): first argument is a side (north, south, east, west) or `to`");
+          }
+          const w = rest.length > 0 ? num(rest[0]) : 0.8;
+          const wh = rest.length > 1 ? num(rest[1]) : 0.8;
+          const sill = rest.length > 2 ? num(rest[2]) : 1;
+          const offset = rest.length > 3 ? num(rest[3]) : 0;
+          if (rest.length > 4 || w === null || w <= 0 || wh === null || wh <= 0 ||
+              sill === null || sill < 0 || offset === null) {
+            return err("window(): expected window(side width? height? sill? offset?)");
+          }
+          windows[side].push({ width: w, height: wh, sill, offset });
           break;
         }
         default:
@@ -1009,6 +1072,20 @@
     if (group.vanish !== null && group.vanish <= group.appear) {
       return err(`"${name}": vanish(${group.vanish}) must come after appear(${group.appear})`);
     }
+    // vertical fit is checked here, after the loop — size() may come
+    // later in the property list than window() (order-free properties)
+    for (const side of Object.keys(windows)) {
+      for (const wd of windows[side]) {
+        if (wd.sill + wd.height >= size[1] - 1e-9) {
+          return err(`window(): sill ${wd.sill} + height ${wd.height} doesn't fit a ${size[1]}-high wall`);
+        }
+      }
+    }
+    for (const a of autos) {
+      if (a.kind === "window" && a.sill + a.height >= size[1] - 1e-9) {
+        return err(`window(to): sill ${a.sill} + height ${a.height} doesn't fit a ${size[1]}-high wall`);
+      }
+    }
 
     // All door carving happens after resolution (carveDoors): door(to)
     // needs resolved positions, and a counterpart opening may be carved
@@ -1016,7 +1093,9 @@
     // emit whole walls here and get their doorways cut in one pass later.
     const members = [];
     for (const wl of roomWalls(size, thick)) {
-      members.push(...wallBoxes(name, wl, [[-wl.span / 2, wl.span / 2]], size[1], thick, color, lineNo, group));
+      members.push(
+        ...wallBoxes(name, wl, [{ lo: -wl.span / 2, hi: wl.span / 2, win: null }], size[1], thick, color, lineNo, group),
+      );
     }
 
     for (const m of members) {
@@ -1026,7 +1105,7 @@
         );
       }
     }
-    group.room = { size, thick, color, doors, autos };
+    group.room = { size, thick, color, doors, windows, autos };
     objects.set(name, group);
     for (const m of members) objects.set(m.name, m);
   }
@@ -1043,47 +1122,71 @@
     ];
   }
 
-  // A wall with doors becomes segments; a door is the absence of wall.
+  // A wall with openings becomes segments. A door is the ABSENCE of
+  // wall; a window keeps wall below (sill) and above (lintel) — a
+  // y-band opening that sight and small things pass through.
+  // Openings: { width, offset } for doors, plus window: {height, sill}.
+  // Returns spans: { lo, hi, win: null | {height, sill} }.
   function wallSegments(span, ds, side, err) {
-    if (!ds.length) return [[-span / 2, span / 2]];
+    if (!ds.length) return [{ lo: -span / 2, hi: span / 2, win: null }];
     const sorted = ds.slice().sort((a, b) => a.offset - b.offset);
     const segs = [];
     let cursor = -span / 2;
-    for (const door of sorted) {
-      const lo = door.offset - door.width / 2;
-      const hi = door.offset + door.width / 2;
+    for (const op of sorted) {
+      const what = op.window ? "window" : "door";
+      const lo = op.offset - op.width / 2;
+      const hi = op.offset + op.width / 2;
       if (lo < -span / 2 - 1e-9 || hi > span / 2 + 1e-9) {
-        err(`door(): the ${side} door (width ${door.width}, offset ${door.offset}) doesn't fit — that wall runs ${span} across`);
+        err(`${what}(): the ${side} ${what} (width ${op.width}, offset ${op.offset}) doesn't fit — that wall runs ${span} across`);
         return null;
       }
       if (lo < cursor - 1e-9) {
         err(
-          `door(): doors overlap on the ${side} wall — a door is door(side width offset), and offset defaults to 0 (centered), so two doors need two offsets`,
+          `openings overlap on the ${side} wall — each door and window needs its own stretch (offset defaults to 0, centered)`,
         );
         return null;
       }
-      if (lo - cursor > 1e-6) segs.push([cursor, lo]);
+      if (lo - cursor > 1e-6) segs.push({ lo: cursor, hi: lo, win: null });
+      if (op.window) segs.push({ lo, hi, win: op.window });
       cursor = hi;
     }
-    if (span / 2 - cursor > 1e-6) segs.push([cursor, span / 2]);
+    if (span / 2 - cursor > 1e-6) segs.push({ lo: cursor, hi: span / 2, win: null });
     return segs;
   }
 
   function wallBoxes(roomName, wl, segs, h, thick, color, lineNo, group) {
-    return segs.map(([lo, hi], i) => {
-      const len = hi - lo;
-      const mid = (lo + hi) / 2;
-      return {
-        name: `${roomName}-${wl.side}${segs.length === 1 ? "" : "-" + (i + 1)}`,
-        shape: "box", line: lineNo,
-        size: wl.along === "x" ? [len, h, thick] : [thick, h, len],
-        r: null, h: null, sides: null,
-        at: wl.along === "x" ? [mid, h / 2, wl.z] : [wl.x, h / 2, mid],
-        rel: null, rot: [0, 0, 0], color,
-        appear: group ? group.appear : 0, vanish: group ? group.vanish : null,
-        parent: roomName,
-      };
+    const boxes = [];
+    const plainTotal = segs.filter((s) => !s.win).length;
+    const winTotal = segs.filter((s) => s.win).length;
+    let pi = 0;
+    let wi = 0;
+    const mk = (nm, len, mid, y, hh) => ({
+      name: nm, shape: "box", line: lineNo,
+      size: wl.along === "x" ? [len, hh, thick] : [thick, hh, len],
+      r: null, h: null, sides: null,
+      at: wl.along === "x" ? [mid, y, wl.z] : [wl.x, y, mid],
+      rel: null, rot: [0, 0, 0], color,
+      appear: group ? group.appear : 0, vanish: group ? group.vanish : null,
+      parent: roomName,
     });
+    for (const s of segs) {
+      const len = s.hi - s.lo;
+      const mid = (s.lo + s.hi) / 2;
+      if (!s.win) {
+        pi++;
+        boxes.push(mk(`${roomName}-${wl.side}${plainTotal === 1 ? "" : "-" + pi}`, len, mid, h / 2, h));
+      } else {
+        wi++;
+        const sfx = winTotal === 1 ? "" : "-" + wi;
+        const below = s.win.sill;
+        const above = h - s.win.sill - s.win.height;
+        if (below > 1e-9) boxes.push(mk(`${roomName}-${wl.side}-sill${sfx}`, len, mid, below / 2, below));
+        if (above > 1e-9) {
+          boxes.push(mk(`${roomName}-${wl.side}-lintel${sfx}`, len, mid, s.win.sill + s.win.height + above / 2, above));
+        }
+      }
+    }
+    return boxes;
   }
 
   // ------------------------------------------------- shared doors (door-to)
@@ -1101,33 +1204,42 @@
     const rooms = [...objects.values()].filter((o) => o.room);
     if (!rooms.length) return new Set();
 
-    // per-room pending door lists, seeded with the manual doors
+    // per-room pending opening lists, seeded with the manual doors and
+    // windows (a window entry carries its y-band: { window: {height, sill} })
+    const winEntry = (w) => ({ width: w.width, offset: w.offset, window: { height: w.height, sill: w.sill } });
     const pending = new Map(rooms.map((r) => [r.name, {
-      north: [...r.room.doors.north], south: [...r.room.doors.south],
-      east: [...r.room.doors.east], west: [...r.room.doors.west],
+      north: [...r.room.doors.north, ...r.room.windows.north.map(winEntry)],
+      south: [...r.room.doors.south, ...r.room.windows.south.map(winEntry)],
+      east: [...r.room.doors.east, ...r.room.windows.east.map(winEntry)],
+      west: [...r.room.doors.west, ...r.room.windows.west.map(winEntry)],
     }]));
-    const seen = new Map(); // "a|b" -> width
-    const connections = []; // shared doors, for marker placement
+    const seen = new Map(); // "a|b|kind" -> width
+    const connections = []; // shared openings, for marker placement
 
     const OPP = { north: "south", south: "north", east: "west", west: "east" };
     for (const rm of rooms) {
       for (const auto of rm.room.autos) {
+        const kind = auto.kind || "door";
         const fail = (msg) => errors.push({ line: auto.line, msg });
         const t = objects.get(auto.target);
-        if (!t) { fail(`door(to): no room named "${auto.target}"`); continue; }
-        if (!t.room) { fail(`door(to): "${auto.target}" is not a room`); continue; }
+        if (!t) { fail(`${kind}(to): no room named "${auto.target}"`); continue; }
+        if (!t.room) { fail(`${kind}(to): "${auto.target}" is not a room`); continue; }
         if ((t.parent || null) !== (rm.parent || null)) {
-          fail(`door(to): "${auto.target}" is in a different frame — connected rooms must be siblings`);
+          fail(`${kind}(to): "${auto.target}" is in a different frame — connected rooms must be siblings`);
           continue;
         }
         if (rm.rot.some((v) => v) || t.rot.some((v) => v)) {
-          fail("door(to): connected rooms can't be rotated (align them axis-parallel)");
+          fail(`${kind}(to): connected rooms can't be rotated (align them axis-parallel)`);
           continue;
         }
-        const key = [rm.name, t.name].sort().join("|");
+        if (kind === "window" && auto.sill + auto.height >= t.room.size[1] - 1e-9) {
+          fail(`window(to): sill ${auto.sill} + height ${auto.height} doesn't fit ${t.name}'s ${t.room.size[1]}-high wall`);
+          continue;
+        }
+        const key = [rm.name, t.name].sort().join("|") + "|" + kind;
         if (seen.has(key)) {
           if (seen.get(key) !== auto.width) {
-            fail(`door(to): ${rm.name} and ${t.name} declare this door with different widths`);
+            fail(`${kind}(to): ${rm.name} and ${t.name} declare this ${kind} with different widths`);
           }
           continue; // same fact stated twice
         }
@@ -1162,21 +1274,25 @@
         if (!hit) {
           if (short !== null) {
             fail(
-              `door(to): the shared wall between ${rm.name} and ${t.name} is only ${Math.max(0, short).toFixed(2)} long — too short for a width-${auto.width} door`,
+              `${kind}(to): the shared wall between ${rm.name} and ${t.name} is only ${Math.max(0, short).toFixed(2)} long — too short for a width-${auto.width} ${kind}`,
             );
           } else {
             fail(
-              `door(to): ${rm.name} and ${t.name} don't share a wall${nearest < Infinity ? ` — their nearest faces are ${nearest.toFixed(2)} apart` : ""}. Place rooms against each other with a relation, e.g. behind(${rm.name}) — room-to-room relations sit wall-to-wall`,
+              `${kind}(to): ${rm.name} and ${t.name} don't share a wall${nearest < Infinity ? ` — their nearest faces are ${nearest.toFixed(2)} apart` : ""}. Place rooms against each other with a relation, e.g. behind(${rm.name}) — room-to-room relations sit wall-to-wall`,
             );
           }
           continue;
         }
 
         const center = (hit.lo + hit.hi) / 2;
-        pending.get(rm.name)[hit.side].push({ width: auto.width, offset: center - rm.pos[hit.cross] });
+        const band = kind === "window" ? { window: { height: auto.height, sill: auto.sill } } : {};
+        pending.get(rm.name)[hit.side].push({ width: auto.width, offset: center - rm.pos[hit.cross], ...band });
         const tp = pending.get(t.name);
-        if (tp) tp[OPP[hit.side]].push({ width: auto.width, offset: center - t.pos[hit.cross] });
-        connections.push({ rm, other: t.name, axis: hit.axis, plane: hit.ownFace, center });
+        if (tp) tp[OPP[hit.side]].push({ width: auto.width, offset: center - t.pos[hit.cross], ...band });
+        connections.push({
+          rm, other: t.name, axis: hit.axis, plane: hit.ownFace, center, kind,
+          y: kind === "window" ? auto.sill + auto.height / 2 : 0,
+        });
       }
     }
 
@@ -1200,18 +1316,21 @@
       });
     }
     for (const c of connections) {
-      const pos = c.axis === 0 ? [c.plane, 0, c.center] : [c.center, 0, c.plane];
-      marker(`${c.rm.name}-${c.other}-door`, c.rm, pos);
+      const pos = c.axis === 0 ? [c.plane, c.y, c.center] : [c.center, c.y, c.plane];
+      marker(`${c.rm.name}-${c.other}-${c.kind}`, c.rm, pos);
     }
     for (const rm of rooms) {
       for (const wl of roomWalls(rm.room.size, rm.room.thick)) {
-        rm.room.doors[wl.side].forEach((d, i) => {
-          const axis = wl.along === "x" ? 0 : 2;
-          const plane = rm.pos[axis === 0 ? 2 : 0] + (axis === 0 ? wl.z : wl.x);
-          const center = rm.pos[axis] + d.offset;
-          const pos = axis === 0 ? [center, 0, plane] : [plane, 0, center];
-          marker(`${rm.name}-${wl.side}-door${i ? "-" + (i + 1) : ""}`, rm, pos);
-        });
+        const axis = wl.along === "x" ? 0 : 2;
+        const plane = rm.pos[axis === 0 ? 2 : 0] + (axis === 0 ? wl.z : wl.x);
+        const place = (offset, y, nm) => {
+          const center = rm.pos[axis] + offset;
+          marker(nm, rm, axis === 0 ? [center, y, plane] : [plane, y, center]);
+        };
+        rm.room.doors[wl.side].forEach((d, i) =>
+          place(d.offset, 0, `${rm.name}-${wl.side}-door${i ? "-" + (i + 1) : ""}`));
+        rm.room.windows[wl.side].forEach((w, i) =>
+          place(w.offset, w.sill + w.height / 2, `${rm.name}-${wl.side}-window${i ? "-" + (i + 1) : ""}`));
       }
     }
 
@@ -1236,7 +1355,11 @@
         }
       }
     }
-    return new Set(connections.map((c) => [c.rm.name, c.other].sort().join("|")));
+    // adjacency = door connections only: a window is not a way THROUGH —
+    // people can't cross it. (The Speckled Band turns on exactly this:
+    // the rooms aren't adjacent, yet death crosses. Sight and small
+    // things pass; adjacency stays a walkability fact.)
+    return new Set(connections.filter((c) => c.kind === "door").map((c) => [c.rm.name, c.other].sort().join("|")));
   }
 
   function applyProp(obj, { key, args }, err, timeCtx) {
@@ -1432,13 +1555,15 @@
       const family = [obj, ...descendantsOf(obj.name)];
       const familyNames = new Set(family.map((f) => f.name));
       const doored = (f) =>
-        f.room && (f.room.autos.length || Object.values(f.room.doors).some((d) => d.length));
+        f.room && (f.room.autos.length ||
+          Object.values(f.room.doors).some((d) => d.length) ||
+          Object.values(f.room.windows).some((w) => w.length));
       if (family.some(doored)) {
-        // door carving runs post-resolution and clone wall names drift
+        // opening carving runs post-resolution and clone wall names drift
         // (cc-north-1 vs cc-1-north); keep this combination off until designed
         errors.push({
           line: obj.line,
-          msg: "repeat: rooms with doors can't repeat yet — lay them out individually",
+          msg: "repeat: rooms with doors or windows can't repeat yet — lay them out individually",
         });
         obj.repeat = null;
         return;
@@ -2849,9 +2974,11 @@
   function compile(src) {
     const { objects, queries, anims, errors, sets, goals, theme, view, clock, times } = parse(src);
     expandRepeats(objects, anims, queries, errors);
-    validateLinks(objects, errors);
     resolveAll(objects, errors);
     const adjacency = carveDoors(objects, errors);
+    // after the carve, so a link may span a doorway/window MARKER —
+    // the Speckled Band's bell-rope hangs from a ventilator
+    validateLinks(objects, errors);
     const duration = buildTracks(objects, anims, errors);
 
     // named sets queries can quantify over: repeat families come free
@@ -2885,7 +3012,7 @@
     return compiled;
   }
 
-  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.26.0" };
+  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.28.1" };
 
   if (typeof module !== "undefined" && module.exports) module.exports = Schauplatz;
   global.Schauplatz = Schauplatz;

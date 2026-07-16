@@ -148,6 +148,8 @@ moves as one).
 | `walls(t)` | wall thickness | `0.2` |
 | `door(side width? offset?)` | a gap in a wall; side is `north/south/east/west`, offset slides it along the wall | width 1, centered |
 | `door(to room width?)` | a **shared** doorway: finds the facing walls, checks the rooms really touch, and carves one aligned opening into *both* rooms, centered on their shared stretch | width 1 |
+| `window(side width? height? sill? offset?)` | a **y-band** opening: wall stays below (the sill) and above (the lintel); sight, air — and small things — pass through the band | 0.8 × 0.8, sill 1, centered |
+| `window(to room width? height? sill?)` | a shared window/ventilator through a party wall, aligned in both rooms like `door(to)` | same |
 | `color(c)` | wall color | slate |
 
 `door(to)` is how a floor plan states its adjacency graph — each
@@ -175,8 +177,16 @@ camera), east +x, west −x; a door's offset runs along its wall's axis.
 
 A door is the **absence of wall** — a wall with doors becomes separate
 segments, so sight lines genuinely pass through doorways and are blocked
-by the segments beside them. There is no floor and no ceiling: the ground
-is the floor, and the camera looks in from above, dollhouse-style.
+by the segments beside them. A window keeps wall below and above
+(`<room>-<side>-sill` / `-lintel` boxes), so a ground-level sight line
+is blocked while one at band height passes. **A window is not
+adjacency**: `adjacent()` and the fact export count only doors — people
+can't cross a window, and the whole Speckled Band turns on exactly that
+distinction (see `examples/speckled-band.scene`). Window markers sit at
+the band's center height (`a-b-window`, `study-north-window`) and, like
+all markers, can anchor a `link` — a bell-rope can hang from a
+ventilator. There is no floor and no ceiling: the ground is the floor,
+and the camera looks in from above, dollhouse-style.
 
 Every doorway also becomes a named **place**: an invisible, zero-size
 marker at the opening's center on the ground — `study-south-door` for
@@ -388,8 +398,10 @@ or set name.
 
 ### at blocks
 
-`at <time> … end` groups statements under one instant — the block's
-time fills in wherever a statement didn't state its own:
+`at <time> … end` groups statements under one instant, and
+`at <t0> .. <t1> … end` under one window — **moment facts and duration
+facts**. The block's time fills in wherever a statement didn't state
+its own:
 
 ```
 at 2:15
@@ -397,7 +409,18 @@ at 2:15
   check never in(alice aviary)                   // gets at(2:15)
   walk eddie to(unknown)                         // gets start(2:15)
 end
+
+at 3:00 .. 3:15
+  walk bob to(cave 1 0) over(0)      // anims anchor at the window START
+  check in(bob cave)                 // bare boolean = a duration fact:
+end                                  //   check always in(bob cave) during(3:00 3:15)
+walk bob to(unknown) start(3:15) over(0)   // and back to unaccounted
 ```
+
+In a range block, a bare boolean check/query defaults to `always` — a
+duration fact is a "held throughout" fact — while an explicit
+quantifier keeps itself and gets the window as its `during()`.
+Non-boolean queries (`distance`) need their own `at()` inside a range.
 
 The rules: **explicit wins** (a statement carrying `start()`, `after()`,
 `at()` or `during()` keeps it); a quantifier is already a time scope, so
@@ -470,6 +493,7 @@ theme ink
 | `noir` | near-black room, one hard raking light, long shadows — for the mysteries |
 | `paper` | warm cream paper, navy-ink outlines and shadows, riso-print palette — vintage journal |
 | `rts` | dark terrain, player-color palette, selection rings under every object — game map |
+| `snow` | white snowfield, overcast winter light, blue-grey shadows, woolen palette — the Orient Express look |
 
 At most one `theme` statement per scene; omitted means the renderer's
 default look. Themes bundle background, ground, lighting, materials, and
@@ -674,11 +698,20 @@ time time_of_death 3:00
 ?- sole(suspects, X, lion_enclosure, time_of_death)
 ```
 
-The starter `rules.pl` speaks detective: `could/4` (who from a set
-lacks an alibi for a room at a named time — the unknown-room
-convention makes "unaccounted" count as "could be anywhere") and
-`sole/4` (exactly one candidate remains). Write your own rules file
-for other domains; the facts don't care. Goals need the playground
+The starter `rules.pl` speaks detective, and its three goals read as a
+case file — the eliminations, the candidates, the verdict:
+
+```
+?- cleared(suspects, X, hut, time_of_death, Where)   → X = alice, Where = beach
+?- could(suspects, X, hut, time_of_death)            → X = bob
+?- sole(suspects, X, hut, time_of_death)             → X = bob
+```
+
+`cleared/5` and `could/4` partition the set — every member is one or
+the other (the unknown-room convention makes "unaccounted" count as
+"could be anywhere"); `sole/4` succeeds when exactly one candidate
+remains. Write your own rules file for other domains; the facts don't
+care. Goals need the playground
 served over HTTP (the engine and rules load at runtime); the core
 never evaluates them — `compiled.goals` is data.
 
