@@ -6,6 +6,9 @@ together. The 3D view is only a projection — everything is in the code.
 
 **[Try the live demo →](https://fndtnio.github.io/Schauplatz/)**
 
+![The Schauplatz playground: a .scene program on the left, its live 3D
+projection on the right, and query answers below the editor.](screenshot1.png)
+
 See [LANGUAGE.md](LANGUAGE.md) for the language spec and roadmap.
 
 ## Running
