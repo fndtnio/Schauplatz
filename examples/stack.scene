@@ -1,0 +1,14 @@
+// A wobbly tower — placement chains resolve in any order,
+// so the program can read top-down even though it builds bottom-up.
+
+sphere cherry r(0.2) on(top) color(crimson)
+
+box top    size(0.8 0.5 0.8) on(middle) rotate(0 25 0) color(#d9c35b)
+box middle size(1.2 0.5 1.2) on(base)   rotate(0 12 0) color(#d9825b)
+box base   size(1.8 0.5 1.8) color(#5b8dd9)
+
+// how tall did we get?
+? distance(cherry base)
+
+// note: rotate() is visual only in v0 — bounds stay axis-aligned,
+// so the twisted boxes still stack and query as if unrotated.

@@ -1,0 +1,11 @@
+// Gravity as an easing curve. Pause and scrub the timeline —
+// "show me t=1.13" beats watching it play.
+
+sphere ball  r(0.4) at(0 4.6 0) color(tomato)
+box crate    size(1 1 1) at(2.5 0.5 0) color(#8b5e3c)
+
+move ball to(0 0.4 0) over(2) ease(bounce)
+turn crate to(0 360 0) over(4) ease(in-out)
+
+// answers update with time
+? distance(ball crate)

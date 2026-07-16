@@ -1,0 +1,12 @@
+// appear() and vanish() give objects a lifetime — and queries respect it.
+// The wall vanishes at t=2: watch the sight line open at that exact moment.
+// The pink ball doesn't exist until t=3; until then, questions about it
+// have no answer.
+
+sphere eye  r(0.3) at(-4 0.5 0) color(gold)
+box target  size(0.6 0.6 0.6) at(4 0.3 0) color(tomato)
+box wall    size(0.3 2 3) at(0 1 0) vanish(2) color(#5b6575)
+sphere late r(0.3) at(0 0.3 2) appear(3) color(hotpink)
+
+? sees(eye target)
+? distance(eye late)

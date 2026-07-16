@@ -1,0 +1,67 @@
+// Mystery-o-matic: the arctic base murder (Jeremy's first authored case).
+// Frida, Carol and Dave are stranded in an abandoned arctic military base
+// during a blizzard. Dave was murdered in the command center between 4:00
+// and 5:45. The murderer was alone with the victim; the body never moved;
+// the murderer wasn't caught with the body.
+//
+// Weapon elimination (from the body):
+//   poison (command center)  — ruled out: no poisoning
+//   screwdriver (radio room) — ruled out: no stab wounds
+//   hammer (armory)          — ruled out: no contusions
+//   pistol (barracks)        — the murder weapon
+
+theme noir
+clock 4:45 minute(0.5)   // the story starts at 4:45; a minute lasts half a second
+
+// the floor plan IS the adjacency graph: each connection declared once —
+// door(to) carves both walls and names the doorway (command_center-barracks-door)
+room command_center size(4 2.5 4) at(-2.2 0 -2.2) door(to barracks 1.1) door(to armory 1.1) door(to radio_room 1.1) color(purple)
+room radio_room size(8.5 2.5 4) at(0.0 0 -6.6) door(to barracks 1.1) color(red)
+room barracks size(4 2.5 4) at(2.2 0 -2.2) color(blue)
+room armory size(4 2.5 4) at(-2.2 0 2.2) color(white)
+
+// the weapon, where the killer found it
+box footlocker size(0.8 0.5 0.5) in(barracks) at(1.4 0.25 1.2) color(#3a3f4a)
+box pistol size(0.3 0.1 0.2) on(footlocker) in(barracks) color(grey)
+
+// 4:45 — Frida: "Spotted Dave arriving while I was in the command center."
+// People live at the top level and walk between rooms by name.
+cylinder frida r(0.25) h(1.6) at(-3.2 0.8 -2.2) color(#c778c7)
+cylinder carol r(0.25) h(1.6) at(-1.2 0.8 -2.2) color(#5b8dd9)
+cylinder dave  r(0.25) h(1.6) at(-2.2 0.8 0.9) appear(4:45) color(grey)
+walk dave to(command_center) over(3m)             // in through the armory door
+
+// Frida heads for the radio room; from its center, the doorways don't
+// line up — she can see nothing of what happens next.
+walk frida to(command_center-radio_room-door) start(4:53) over(4m)
+walk frida to(radio_room) over(2m)
+
+// 5:15 — death was by now. Carol is alone with Dave, unobserved.
+turn dave to(90 0 0) start(5:15) over(1m) ease(in)     // topple...
+move dave by(0 -0.55 0) start(5:15) over(1m) ease(in)  // ...and land
+
+// 5:45 — everyone's known position: Frida and Carol in the barracks,
+// Dave's body alone in the command center.
+walk frida to(radio_room-barracks-door) start(5:36) over(3m)
+walk frida to(1.8 -2.2) over(4m)
+walk carol to(command_center-barracks-door) start(5:39) over(3m)
+walk carol to(3.8 -2.2) over(3m)
+
+// interrogate the case — quantified answers speak wall-clock time:
+? when sees(frida dave)    // her eyes are off dave across the death at 5:15
+? when sees(frida carol)   // ...and off carol: the killer was unobserved
+? when in(carol command_center)
+? ever sees(frida dave)    // frida saw the body later: the discovery
+? distance(carol pistol)
+
+// and assert the testimony — a failing check is a compile error naming
+// the violating times, so this scene PROVES its own case file:
+check in(dave command_center) at(5:15)                  // the body, where it must be
+check never in(frida command_center) during(5:00 5:40)  // frida gone across the murder window
+check always in(carol command_center) during(4:50 5:40) // carol never left the victim
+check never sees(frida dave) during(5:10 5:20)          // no one witnessed the death
+
+// sets quantify over people ("someone", "no one") in one line:
+set crew frida carol dave
+check always in(crew command_center)                    // the room was never unattended
+check never in(crew armory) except(dave)                // only dave ever passed the armory

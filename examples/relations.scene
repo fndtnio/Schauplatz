@@ -1,0 +1,20 @@
+// Every placement relation, around one anchor.
+// An object gets at() OR one relation; with neither it rests at the origin.
+
+box anchor   size(1 1 1) color(#5b6575)
+
+sphere top   r(0.3) on(anchor) color(tomato)
+sphere float r(0.3) above(anchor 1) color(hotpink)
+sphere under r(0.3) below(float 0.3) color(#c778c7)
+
+cylinder west r(0.3) h(1.4) left-of(anchor) color(seagreen)
+cylinder east r(0.3) h(1.4) right-of(anchor) color(#6fbf8e)
+
+box near  size(0.6 0.6 0.6) in-front-of(anchor) color(#d9c35b)
+box far   size(0.6 0.6 0.6) behind(anchor) color(#d9825b)
+
+// relations chain: this sits on something that is itself placed relatively
+sphere crumb r(0.12) on(near) color(white)
+
+? distance(west east)
+? overlaps(top float)

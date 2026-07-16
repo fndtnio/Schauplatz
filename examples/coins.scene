@@ -1,0 +1,15 @@
+// Coins — repeat stamps copies; spread lines them up, jitter scatters
+// them (seeded: same scene, same scatter, every time), stagger runs each
+// copy's animation behind the previous. One move line animates them all.
+
+theme clay
+
+box desk size(1.6 0.75 0.8) at(0 0.375 0) color(#8b5e3c)
+
+cylinder coin r(0.08) h(0.02) at(-0.4 0.76 0) color(gold) repeat(9) spread(0.09 0 0) jitter(0.02 0 0.15 5) stagger(0.3)
+
+move coin by(0.9 0 0) over(0.6) ease(in)       // slide across the desk...
+move coin by(0.45 -0.75 0) over(0.35) ease(in) // ...and off the edge
+
+? distance(coin-1 coin-9)
+? overlaps(coin-1 desk)

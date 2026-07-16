@@ -1,0 +1,18 @@
+// A truck — a GROUP: body, cab, and a crate riding on top — drives across
+// the lot. Members are placed in truck-local coordinates and move as one.
+// The watcher can only see the truck through the gap between the sheds.
+
+group truck at(-7 0 2)
+box body  size(1.8 0.9 1) in(truck) at(0 0.45 0) color(#d9825b)
+box cab   size(0.7 0.6 0.9) in(truck) at(0.55 1.2 0) color(#c96f4a)
+box crate size(0.5 0.5 0.5) in(truck) on(body) color(#8b5e3c)
+
+move truck by(14 0 0) over(6)
+
+box shed-a size(2 2 2) at(-2 1 -1) color(#5b6575)
+box shed-b size(2 2 2) at(2 1 -1) color(#5b6575)
+sphere watcher r(0.3) at(0 0.3 -4) color(gold)
+
+// the truck is one thing to a query: its bounds are the union of its parts
+? sees(watcher truck)
+? distance(watcher truck)

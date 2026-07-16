@@ -1,0 +1,1148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schauplatz</title>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tau-prolog@0.3.4/modules/core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tau-prolog@0.3.4/modules/lists.min.js"></script>
+
+<style>
+  :root {
+    --bg: #16181d;
+    --panel: #1d2026;
+    --border: #2a2e39;
+    --text: #cdd3e0;
+    --dim: #7c8493;
+    --err: #e0736f;
+    --ok: #7fbf8e;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 8px 14px; border-bottom: 1px solid var(--border);
+    background: var(--panel); flex: none;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.5px; }
+  header .hint { color: var(--dim); font-size: 12px; }
+  header .spacer { flex: 1; }
+  header button, header select {
+    background: none; border: 1px solid var(--border); color: var(--dim);
+    font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+  }
+  header button:hover, header select:hover { color: var(--text); border-color: var(--dim); }
+  header button.on { color: var(--ok); border-color: var(--ok); }
+  header select { background: var(--panel); }
+  header select option { background: var(--panel); color: var(--text); }
+
+  main { display: flex; flex: 1; min-height: 0; }
+
+  #left {
+    width: 44%; min-width: 340px; display: flex; flex-direction: column;
+    border-right: 1px solid var(--border);
+  }
+  #editor-wrap { flex: 1; min-height: 0; }
+  .CodeMirror { height: 100%; font: 13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; }
+  .CodeMirror.cm-s-material-darker { background: var(--bg); }
+  .cm-s-material-darker .CodeMirror-gutters { background: var(--bg); border-right: 1px solid var(--border); }
+  .cm-s-material-darker span.cm-comment { color: #8a93a5; } /* theme default is too dark against --bg */
+  .cm-errorLine { background: rgba(224, 115, 111, 0.13) !important; }
+
+  #output {
+    flex: none; max-height: 32%; overflow-y: auto;
+    border-top: 1px solid var(--border); background: var(--panel);
+    padding: 8px 14px; white-space: pre-wrap;
+  }
+  #output .result { color: var(--ok); }
+  #output .error { color: var(--err); }
+  #output .goal { color: #b58fd9; } /* rules-layer answers: derived, not stated */
+  #output .goal-sole { font-weight: 700; } /* one answer left: the verdict */
+
+  #view { flex: 1; position: relative; min-width: 0; }
+  #view canvas { display: block; }
+  #hover-label {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(22, 24, 29, 0.9); border: 1px solid var(--border);
+    color: var(--text); padding: 1px 8px; border-radius: 4px; font-size: 12px;
+  }
+  body.no-editor header, body.no-editor #left { display: none; }
+  body.no-editor #output.empty { display: none; }
+  body.no-editor #output {
+    position: absolute; top: 12px; left: 12px; z-index: 5;
+    max-width: 46%; max-height: 42%; overflow-y: auto;
+    background: rgba(29, 32, 38, 0.88); border: 1px solid var(--border);
+    border-radius: 6px; border-top: 1px solid var(--border);
+  }
+
+  #transport {
+    position: absolute; left: 14px; right: 14px; bottom: 12px;
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(29, 32, 38, 0.9); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px;
+  }
+  #transport button {
+    background: none; border: none; color: var(--text);
+    font: inherit; font-size: 14px; cursor: pointer; padding: 0 4px;
+  }
+  #transport[hidden] { display: none; } /* author display:flex beats the hidden attr otherwise */
+  #transport input[type="range"] { flex: 1; accent-color: #5b8dd9; }
+
+  /* ---- spec viewer: LANGUAGE.md rendered in an overlay ---- */
+  #spec-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(10, 11, 14, 0.6);
+    display: flex; justify-content: center; padding: 28px 16px;
+  }
+  #spec-overlay[hidden] { display: none; }
+  #spec-panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    max-width: 840px; width: 100%; overflow-y: auto; padding: 6px 28px 24px;
+  }
+  #spec-panel .spec-top {
+    position: sticky; top: 0; background: var(--panel);
+    display: flex; justify-content: flex-end; padding: 8px 0;
+  }
+  .md { font-size: 13px; line-height: 1.6; }
+  .md h1, .md h2 { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .md h1 { font-size: 18px; }
+  .md h2 { font-size: 15px; margin-top: 24px; }
+  .md code { background: var(--bg); padding: 1px 5px; border-radius: 3px; }
+  .md pre { background: var(--bg); padding: 10px 14px; border-radius: 6px; overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md table { border-collapse: collapse; margin: 10px 0; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+  .md th { color: var(--dim); font-weight: 600; }
+  .md a { color: #5b8dd9; }
+  /* ---- facts viewer: the scene as ground facts (v3 substrate) ---- */
+  #facts-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(10, 11, 14, 0.6);
+    display: flex; justify-content: center; padding: 28px 16px;
+  }
+  #facts-overlay[hidden] { display: none; }
+  #facts-panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    max-width: 720px; width: 100%; overflow-y: auto; padding: 6px 28px 24px;
+  }
+  #facts-panel .spec-top { position: sticky; top: 0; background: var(--panel); display: flex; align-items: center; gap: 8px; padding: 8px 0; }
+  #facts-panel .facts-hint { color: var(--dim); font-size: 12px; margin-right: auto; }
+  #facts-body { font-size: 12.5px; line-height: 1.55; background: var(--bg); padding: 12px 16px; border-radius: 6px; overflow-x: auto; }
+
+  /* fixed width + tabular digits: if this span breathes while the wall
+     clock ticks, the flexed slider resizes mid-drag and the thumb jumps */
+  #transport #clock { color: var(--dim); min-width: 19ch; text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Schauplatz</h1>
+  <span class="hint">everything is code — the 3D is just a view</span>
+  <span class="spacer"></span>
+  <select id="examples" hidden><option value="">examples…</option></select>
+  <button id="axes">axes</button>
+  <button id="spec">spec</button>
+  <button id="facts">facts</button>
+  <button id="new">new</button>
+  <button id="open">open…</button>
+  <button id="save">save</button>
+  <button id="reset">reset</button>
+  <input id="file-input" type="file" accept=".scene,.txt" hidden>
+</header>
+
+<div id="spec-overlay" hidden>
+  <div id="spec-panel">
+    <div class="spec-top"><button id="spec-close">close (esc)</button></div>
+    <div id="spec-body" class="md">loading…</div>
+  </div>
+</div>
+
+<div id="facts-overlay" hidden>
+  <div id="facts-panel">
+    <div class="spec-top">
+      <span class="facts-hint">the scene as ground facts — what a rules layer (or an LLM) consumes</span>
+      <button id="facts-copy">copy</button>
+      <button id="facts-close">close (esc)</button>
+    </div>
+    <pre id="facts-body"></pre>
+  </div>
+</div>
+
+<main>
+  <div id="left">
+    <div id="editor-wrap"><textarea id="src"></textarea></div>
+    <div id="output"></div>
+  </div>
+  <div id="view">
+    <div id="hover-label"></div>
+    <div id="transport" hidden>
+      <button id="play">⏸</button>
+      <input id="scrub" type="range" min="0" max="1" step="0.01" value="0">
+      <span id="clock">0.00s</span>
+    </div>
+  </div>
+</main>
+
+<script src="lang.js"></script>
+
+<script>
+// ------------------------------------------------------------ editor setup
+const EXAMPLE = `// Schauplatz v0 — a scene is a set of facts, not draw calls.
+// Drag to orbit, scroll to zoom. Edits re-render live.
+
+box crate    size(1.2 1.2 1.2) color(#8b5e3c)
+sphere ball  r(0.35) on(crate) color(tomato)
+cylinder can r(0.25) h(0.8) left-of(crate) color(seagreen)
+
+box plank    size(2.4 0.1 0.6) above(crate 0.8) color(#d9c35b)
+sphere pea   r(0.15) on(plank) color(hotpink)
+
+box wall     size(4 2 0.2) behind(crate 1) color(#5b6575)
+
+// queries are statements too — answers appear below the editor,
+// and sight lines are drawn in the view (green = clear, red = blocked)
+? overlaps(plank wall)
+? distance(ball pea)
+? sees(ball pea)
+`;
+
+CodeMirror.defineMode("scene", () => ({
+  token(stream) {
+    if (stream.match(/\/\/.*/)) return "comment";
+    if (stream.match(/\?/)) return "keyword";
+    if (stream.match(/#[0-9a-fA-F]{3,8}\b/)) return "atom";
+    if (stream.match(/-?(\d+\.?\d*|\.\d+)/)) return "number";
+    if (stream.match(/(box|sphere|cylinder|group|room|link|part|end|move|turn|orbit|walk|theme|view|clock|check|set|ever|always|when|never)\b/)) return "keyword";
+    if (stream.match(/[A-Za-z_][\w-]*(?=\()/)) return "def";
+    if (stream.match(/[A-Za-z_][\w-]*/)) return "variable";
+    stream.next();
+    return null;
+  },
+}));
+
+// ------------------------------------------------------------- embed mode
+// ?scene=<path>  load a scene file from the server (and leave localStorage
+//                alone, so embeds never clobber the playground buffer)
+// ?editor=0      hide header+editor; query answers overlay the viewport
+const params = new URLSearchParams(location.search);
+const embedScene = params.get("scene");
+const showEditor = params.get("editor") !== "0";
+
+const STORAGE_KEY = "schauplatz-src";
+const editor = CodeMirror.fromTextArea(document.getElementById("src"), {
+  mode: "scene",
+  theme: "material-darker",
+  lineNumbers: true,
+});
+
+if (!showEditor) {
+  document.body.classList.add("no-editor");
+  document.getElementById("view").appendChild(document.getElementById("output"));
+}
+
+// Set when a scene is loaded wholesale (open/example/new/reset/embed):
+// the viewer re-frames the camera to fit it on the next compile.
+window.framePending = true;
+
+if (embedScene) {
+  fetch(embedScene)
+    .then((r) => (r.ok ? r.text() : Promise.reject(new Error("HTTP " + r.status))))
+    .then((text) => {
+      window.framePending = true;
+      editor.setValue(text);
+      currentName = embedScene.split("/").pop().replace(/\.scene$/, "");
+    })
+    .catch((err) => {
+      document.getElementById("output").innerHTML =
+        `<div class="error">couldn't load ${embedScene}: ${err.message}</div>`;
+    });
+} else {
+  editor.setValue(localStorage.getItem(STORAGE_KEY) || EXAMPLE);
+}
+
+document.getElementById("reset").addEventListener("click", () => {
+  window.framePending = true;
+  editor.setValue(EXAMPLE);
+  currentName = "scene";
+});
+
+document.getElementById("new").addEventListener("click", () => {
+  if (editor.getValue().trim() && !confirm("Start a new scene? The editor will be cleared.")) {
+    return;
+  }
+  window.framePending = true;
+  editor.setValue("// untitled\n");
+  currentName = "untitled";
+  document.getElementById("examples").value = "";
+  editor.focus();
+});
+
+// ------------------------------------------------------------- spec viewer
+const specOverlay = document.getElementById("spec-overlay");
+const specBody = document.getElementById("spec-body");
+let specLoaded = false;
+
+async function openSpec() {
+  specOverlay.hidden = false;
+  if (specLoaded) return;
+  try {
+    const r = await fetch("LANGUAGE.md");
+    if (!r.ok) throw new Error(r.status);
+    specBody.innerHTML = marked.parse(await r.text());
+    specLoaded = true;
+  } catch {
+    specBody.innerHTML =
+      '<div class="error">Couldn\'t load LANGUAGE.md — the spec view needs the playground served over HTTP (npm run serve).</div>';
+  }
+}
+
+document.getElementById("spec").addEventListener("click", openSpec);
+document.getElementById("spec-close").addEventListener("click", () => (specOverlay.hidden = true));
+specOverlay.addEventListener("click", (e) => {
+  if (e.target === specOverlay) specOverlay.hidden = true;
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") specOverlay.hidden = true;
+});
+if (location.hash === "#spec") openSpec(); // deep link: index.html#spec
+
+// ------------------------------------------------------- facts viewer
+// The compiled scene as ground facts (Prolog text) — the v3 substrate.
+// Refreshes on open; while open, recompiles keep it current.
+const factsOverlay = document.getElementById("facts-overlay");
+const factsBody = document.getElementById("facts-body");
+function renderFacts() {
+  factsBody.textContent = latest.facts ? Schauplatz.prolog(latest) : "nothing compiled yet";
+}
+document.getElementById("facts").addEventListener("click", () => {
+  renderFacts();
+  factsOverlay.hidden = false;
+});
+document.getElementById("facts-copy").addEventListener("click", () => {
+  navigator.clipboard.writeText(factsBody.textContent);
+});
+document.getElementById("facts-close").addEventListener("click", () => (factsOverlay.hidden = true));
+factsOverlay.addEventListener("click", (e) => {
+  if (e.target === factsOverlay) factsOverlay.hidden = true;
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") factsOverlay.hidden = true;
+});
+
+// ------------------------------------------------------- files & examples
+// The dropdown needs the folder served over HTTP (fetch can't read
+// neighboring files from file://). "open…" and "save" work everywhere.
+let currentName = "scene"; // basename for save
+
+const exampleSelect = document.getElementById("examples");
+fetch("examples/manifest.json")
+  .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+  .then((files) => {
+    for (const f of files) {
+      const opt = document.createElement("option");
+      opt.value = f;
+      opt.textContent = f.replace(/\.scene$/, "");
+      exampleSelect.appendChild(opt);
+    }
+    exampleSelect.hidden = false;
+  })
+  .catch(() => {}); // file:// or no manifest — dropdown stays hidden
+
+exampleSelect.addEventListener("change", async () => {
+  const file = exampleSelect.value;
+  if (!file) return;
+  try {
+    const r = await fetch("examples/" + file);
+    if (!r.ok) throw new Error(r.status);
+    window.framePending = true;
+    editor.setValue(await r.text());
+    currentName = file.replace(/\.scene$/, "");
+  } catch (err) {
+    output.innerHTML = `<div class="error">couldn't load ${file}: ${err.message}</div>`;
+  }
+});
+
+const fileInput = document.getElementById("file-input");
+document.getElementById("open").addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  window.framePending = true;
+  editor.setValue(await file.text());
+  currentName = file.name.replace(/\.(scene|txt)$/, "");
+  exampleSelect.value = "";
+  fileInput.value = "";
+});
+
+document.getElementById("save").addEventListener("click", () => {
+  const name = prompt("save as", currentName + ".scene");
+  if (!name) return;
+  currentName = name.replace(/\.scene$/, "");
+  const blob = new Blob([editor.getValue()], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name.endsWith(".scene") ? name : name + ".scene";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+// ------------------------------------------------------------ compile loop
+const output = document.getElementById("output");
+let errorLines = [];
+let latest = { objects: [], results: [], errors: [] };
+let debounceTimer = null;
+
+editor.on("change", () => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(recompile, 200);
+});
+
+function recompile() {
+  const src = editor.getValue();
+  if (!embedScene) localStorage.setItem(STORAGE_KEY, src);
+  latest = Schauplatz.compile(src);
+
+  errorLines.forEach((l) => editor.removeLineClass(l, "background", "cm-errorLine"));
+  errorLines = latest.errors.map((e) => e.line - 1);
+  errorLines.forEach((l) => editor.addLineClass(l, "background", "cm-errorLine"));
+
+  const parts = [`<div id="result-lines"></div><div id="goal-lines"></div>`];
+  for (const e of latest.errors) {
+    parts.push(`<div class="error">line ${e.line}: ${e.msg}</div>`);
+  }
+  output.innerHTML = parts.join("");
+  // an embed with nothing to say shouldn't float an empty box
+  output.classList.toggle(
+    "empty",
+    latest.results.length === 0 && latest.errors.length === 0 && (latest.goals || []).length === 0,
+  );
+  renderResults(latest.results);
+  runGoals(latest);
+  if (!factsOverlay.hidden) renderFacts(); // keep the facts view live while editing
+
+  if (window.onCompiled) window.onCompiled(latest);
+}
+
+function renderResults(results) {
+  const el = document.getElementById("result-lines");
+  if (!el) return;
+  el.innerHTML = results
+    .map((r) => `<div class="${r.error ? "error" : "result"}">${r.check ? "" : "? "}${r.text}</div>`)
+    .join("");
+}
+
+// ------------------------------------------------- goals: the rules layer
+// ?- statements ask Tau Prolog, consulted with the scene's fact export +
+// rules.pl. Answers land async in #goal-lines; a generation counter keeps
+// stale runs from writing over fresh compiles.
+let rulesText = null; // null = still loading; "" = unavailable
+fetch("rules.pl")
+  .then((r) => (r.ok ? r.text() : Promise.reject(new Error(r.status))))
+  .then((text) => { rulesText = text; runGoals(latest); })
+  .catch(() => { rulesText = ""; runGoals(latest); });
+
+let goalGen = 0;
+function runGoals(compiled) {
+  const el = document.getElementById("goal-lines");
+  if (!el) return;
+  const goals = compiled.goals || [];
+  const gen = ++goalGen;
+  if (!goals.length) { el.innerHTML = ""; return; }
+  const line = (g, text, cls) => `<div class="${cls || "goal"}">?- ${g.goal} ${text}</div>`;
+  if (typeof pl === "undefined") {
+    el.innerHTML = goals.map((g) => line(g, "— Prolog engine unavailable (CDN)", "error")).join("");
+    return;
+  }
+  if (rulesText === null) {
+    el.innerHTML = goals.map((g) => line(g, "— loading rules…")).join("");
+    return; // re-run when rules.pl arrives
+  }
+  if (rulesText === "") {
+    el.innerHTML = goals.map((g) => line(g, "— couldn't load rules.pl (serve over HTTP)", "error")).join("");
+    return;
+  }
+  const session = pl.create(100000);
+  const program = Schauplatz.prolog(compiled) + "\n" + rulesText;
+  const texts = goals.map((g) => line(g, "…"));
+  const paint = () => { if (gen === goalGen) el.innerHTML = texts.join(""); };
+  paint(); // pending state immediately — answers land as each goal finishes
+  session.consult(program, {
+    success: () => askGoal(0),
+    error: (err) => {
+      texts.forEach((_, i) => (texts[i] = line(goals[i], `— rules didn't load: ${err}`, "error")));
+      paint();
+    },
+  });
+  function askGoal(i) {
+    if (gen !== goalGen || i >= goals.length) return;
+    const g = goals[i];
+    const answers = [];
+    session.query(g.goal + ".", {
+      success: () => step(),
+      error: (err) => { texts[i] = line(g, `— bad goal: ${err}`, "error"); paint(); askGoal(i + 1); },
+    });
+    function step() {
+      session.answer({
+        success: (a) => {
+          const s = pl.format_answer(a).replace(/\s*;\s*$/, "").replace(/\.$/, "");
+          answers.push(s === "true" ? "true" : s);
+          if (answers.length < 16) step();
+          else finish();
+        },
+        fail: finish,
+        error: (err) => { texts[i] = line(g, `— ${err}`, "error"); paint(); askGoal(i + 1); },
+        limit: finish,
+      });
+    }
+    function finish() {
+      const n = answers.length;
+      texts[i] = line(
+        g,
+        n === 0 ? "→ no" : `→ ${answers.join(" · ")}${n > 1 ? ` (${n} answers)` : ""}`,
+        n === 1 ? "goal goal-sole" : "goal",
+      );
+      paint();
+      askGoal(i + 1);
+    }
+  }
+}
+</script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const view = document.getElementById("view");
+const hoverLabel = document.getElementById("hover-label");
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+view.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+
+let camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
+camera.position.set(6, 8, 9); // high enough to see into rooms (dollhouse view)
+
+let controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 1, 0);
+
+// ------------------------------------------------------------ view (scene)
+// `view iso|top` asks for an orthographic projection and a starting
+// vantage; orbiting stays free. Omitted = this perspective camera.
+let currentView = "free";
+const VIEW_DIRS = {
+  iso: [1, 1, 1], // classic RTS: 45° azimuth, ~35° elevation
+  top: [0, 1, 0.06], // floor plan; the slight south tilt puts north at the top of the screen
+};
+
+function applyView(name) {
+  if (name === currentView) return;
+  currentView = name;
+  const target = controls.target.clone();
+  if (name === "free") {
+    camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
+    camera.position.set(6, 8, 9);
+  } else {
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 500);
+    camera.userData.halfH = 8; // frameScene refines to the scene's size
+  }
+  controls.dispose();
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.target.copy(target);
+  window.framePending = true;
+  resize();
+}
+
+// ------------------------------------------------------------------ themes
+// A theme is a whole-scene look: environment + how materials are built.
+// The language core only carries the name (compiled.theme); everything
+// visual about a theme lives here, in the renderer, where it belongs.
+const SCENE_THEMES = {
+  default: {
+    bg: 0x16181d,
+    hemi: { sky: 0xdde4f0, ground: 0x30343d, intensity: 0.9 },
+    sun: { color: 0xffffff, intensity: 1.6, pos: [5, 10, 6] },
+    grid: { big: 0x333845, small: 0x232630 },
+    shadowOpacity: 0.3,
+    palette: ["#5b8dd9", "#d9825b", "#6fbf8e", "#c778c7", "#d9c35b", "#7fb8c9"],
+    material: (color, o) =>
+      new THREE.MeshStandardMaterial({ color, roughness: 0.65, flatShading: !!o.sides }),
+    outline: 0,
+    edges: null,
+  },
+  // matte pastel model-clay look: warm room, soft light, gentle shadows
+  clay: {
+    bg: 0xf1eae0,
+    hemi: { sky: 0xfff6ec, ground: 0xcbbfae, intensity: 1.15 },
+    sun: { color: 0xfff2e0, intensity: 1.0, pos: [5, 10, 6] },
+    grid: { big: 0xdcd2c2, small: 0xe8e0d2 },
+    shadowOpacity: 0.14,
+    palette: ["#e3a49e", "#a5c3e0", "#a9d4af", "#d3b2da", "#e4d1a1", "#9ecfd6"],
+    material: (color, o) =>
+      new THREE.MeshStandardMaterial({ color, roughness: 1.0, flatShading: !!o.sides }),
+    outline: 0,
+    edges: null,
+  },
+  // technical-illustration look: white page, flat shading, black outlines;
+  // built to survive grayscale printing
+  ink: {
+    bg: 0xffffff,
+    hemi: { sky: 0xffffff, ground: 0xd4d4d4, intensity: 1.5 },
+    sun: { color: 0xffffff, intensity: 0.55, pos: [5, 10, 6] },
+    grid: { big: 0xc9c9c9, small: 0xe8e8e8 },
+    shadowOpacity: 0.1,
+    palette: ["#f2f2f2", "#dedede", "#cccccc", "#f2f2f2", "#dedede", "#cccccc"],
+    material: (color, o) =>
+      new THREE.MeshToonMaterial({ color, flatShading: !!o.sides }),
+    outline: 0.018, // absolute line half-weight in world units
+    outlineColor: 0x1a1a1a,
+    edges: null,
+  },
+  // drafting-table look: blue paper, translucent fills, white line work
+  blueprint: {
+    bg: 0x143a66,
+    hemi: { sky: 0xffffff, ground: 0xbcd0e8, intensity: 1.6 },
+    sun: { color: 0xffffff, intensity: 0.4, pos: [5, 10, 6] },
+    grid: { big: 0x3f6ea0, small: 0x28517d },
+    shadowOpacity: 0, // drawings don't cast shadows
+    palette: ["#dce9f7", "#bcd4ec", "#9fc2e4", "#dce9f7", "#bcd4ec", "#9fc2e4"],
+    // x-ray fills: depthWrite off so you can see through to objects behind
+    material: (color, o) =>
+      new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.25, depthWrite: false }),
+    outline: 0,
+    edges: 0xeaf2fb, // white line work on boxes and faceted cylinders
+  },
+  // vintage-journal look (borrowed from klangbild): warm cream paper, deep
+  // navy ink instead of black, riso-print accent palette, flat shading
+  paper: {
+    bg: 0xf7f2e6,
+    hemi: { sky: 0xfffdf5, ground: 0xe8dfc8, intensity: 1.45 },
+    sun: { color: 0xfff8e8, intensity: 0.5, pos: [5, 10, 6] },
+    grid: { big: 0xccc9bd, small: 0xe6e1d1 },
+    shadowOpacity: 0.15,
+    shadowColor: 0x22304a, // shadows printed in ink, not black
+    palette: ["#c8451f", "#1f7a6d", "#3d7fa6", "#b98a1d", "#7a4fa0", "#5a7a1f"],
+    material: (color, o) =>
+      new THREE.MeshToonMaterial({ color, flatShading: !!o.sides }),
+    outline: 0.018,
+    outlineColor: 0x22304a, // navy ink lines
+    edges: null,
+  },
+  // game-map look: dark terrain, high game-light, armored sheen, classic
+  // player-color palette, and a selection ring under every unit
+  rts: {
+    bg: 0x0e1420,
+    hemi: { sky: 0x9db4d8, ground: 0x141a26, intensity: 0.7 },
+    sun: { color: 0xfff0d8, intensity: 1.9, pos: [6, 12, 4] },
+    grid: { big: 0x263349, small: 0x1a2334 },
+    shadowOpacity: 0.5,
+    palette: ["#f40404", "#0c48cc", "#2cb494", "#88409c", "#f88c14", "#fcfc38"],
+    material: (color, o) =>
+      new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0.35, flatShading: !!o.sides }),
+    outline: 0,
+    edges: null,
+    ring: 0x22dd44, // selection-circle green
+  },
+  // one hard raking light, long shadows, near-black room, muted colors —
+  // plus a cool moonlight rim from the far side so dark faces still read
+  noir: {
+    bg: 0x0b0b0e,
+    hemi: { sky: 0x46506a, ground: 0x0c0d10, intensity: 0.55 },
+    sun: { color: 0xfff2dc, intensity: 2.6, pos: [10, 3.5, 2] },
+    rim: { color: 0x8fa3cc, intensity: 0.9, pos: [-8, 6, -6] },
+    grid: { big: 0x1d2027, small: 0x14161b },
+    shadowOpacity: 0.65,
+    palette: ["#8a8d94", "#6e7178", "#9a9489", "#7d8087", "#8f8a80", "#767a80"],
+    material: (color, o) =>
+      new THREE.MeshStandardMaterial({ color, roughness: 0.5, flatShading: !!o.sides }),
+    outline: 0,
+    edges: null,
+  },
+};
+
+const hemi = new THREE.HemisphereLight();
+scene.add(hemi);
+const sun = new THREE.DirectionalLight();
+sun.castShadow = true;
+// optional per-theme rim/fill light (noir's "moonlight"); no shadows
+const rim = new THREE.DirectionalLight();
+rim.intensity = 0;
+scene.add(rim);
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = sun.shadow.camera.bottom = -12;
+sun.shadow.camera.right = sun.shadow.camera.top = 12;
+scene.add(sun);
+
+let grid = null;
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.ShadowMaterial({ opacity: 0.3 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+let currentThemeName = null;
+function applyEnvironment(name) {
+  if (name === currentThemeName) return;
+  currentThemeName = name;
+  const t = SCENE_THEMES[name];
+  scene.background = new THREE.Color(t.bg);
+  hemi.color.set(t.hemi.sky);
+  hemi.groundColor.set(t.hemi.ground);
+  hemi.intensity = t.hemi.intensity;
+  sun.color.set(t.sun.color);
+  sun.intensity = t.sun.intensity;
+  sun.position.set(...t.sun.pos); // noir rakes its light low for long shadows
+  if (t.rim) {
+    rim.color.set(t.rim.color);
+    rim.intensity = t.rim.intensity;
+    rim.position.set(...t.rim.pos);
+  } else {
+    rim.intensity = 0;
+  }
+  ground.material.opacity = t.shadowOpacity;
+  ground.material.color.set(t.shadowColor || 0x000000); // paper prints shadows in ink
+  if (grid) {
+    scene.remove(grid);
+    grid.geometry.dispose();
+    grid.material.dispose();
+  }
+  grid = new THREE.GridHelper(20, 20, t.grid.big, t.grid.small);
+  scene.add(grid);
+}
+applyEnvironment("default");
+
+// -------------------------------------------------------- scene rebuilding
+const objectGroup = new THREE.Group();
+scene.add(objectGroup);
+
+// Sight lines from sees()/blocked-by() queries. Drawn on top of everything
+// (no depth test) — the point is to see the query, even through objects.
+const lineGroup = new THREE.Group();
+scene.add(lineGroup);
+
+const CLEAR_COLOR = 0x7fbf8e;
+const BLOCKED_COLOR = 0xe0736f;
+
+function addSightLine(from, to, color) {
+  const geom = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(...from),
+    new THREE.Vector3(...to),
+  ]);
+  const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85, depthTest: false });
+  const line = new THREE.Line(geom, mat);
+  line.renderOrder = 999;
+  lineGroup.add(line);
+}
+
+function lerp3(a, b, t) {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+
+function rebuildSightLines(results) {
+  for (const line of lineGroup.children) {
+    line.geometry.dispose();
+    line.material.dispose();
+  }
+  lineGroup.clear();
+
+  for (const r of results) {
+    if (r.error || !r.sight) continue;
+    const { from, to, hits } = r.sight;
+    if (hits.length === 0) {
+      addSightLine(from, to, CLEAR_COLOR);
+    } else {
+      const cut = lerp3(from, to, hits[0].t);
+      if (hits[0].t > 0) addSightLine(from, cut, CLEAR_COLOR);
+      addSightLine(cut, to, BLOCKED_COLOR);
+    }
+  }
+}
+
+const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+// Explicit color() always wins; the theme only supplies the fallback
+// palette for uncolored objects (and how any color is shaded).
+function resolveColor(spec, index, palette) {
+  if (!spec) return new THREE.Color(palette[index % palette.length]);
+  if (HEX_RE.test(spec) || spec.toLowerCase() in THREE.Color.NAMES) {
+    return new THREE.Color(spec.toLowerCase());
+  }
+  return new THREE.Color(0x888888); // unknown color name: neutral grey
+}
+
+function geometryFor(o) {
+  switch (o.shape) {
+    case "box": return new THREE.BoxGeometry(o.size[0], o.size[1], o.size[2]);
+    case "sphere": return new THREE.SphereGeometry(o.r, 32, 16);
+    case "cylinder": return new THREE.CylinderGeometry(o.r, o.r, o.h, o.sides || 32);
+    case "link": return new THREE.CylinderGeometry(o.r, o.r, 1, o.sides || 16); // unit height, scaled per frame
+  }
+}
+
+const DEG = Math.PI / 180;
+
+// ------------------------------------------------------- time & transport
+const transport = document.getElementById("transport");
+const playBtn = document.getElementById("play");
+const scrub = document.getElementById("scrub");
+const clock = document.getElementById("clock");
+
+let compiled = null;
+const meshes = new Map(); // name -> mesh
+let animT = 0;
+let playing = true;
+let lastResultsText = null;
+
+playBtn.addEventListener("click", () => {
+  playing = !playing;
+  playBtn.textContent = playing ? "⏸" : "▶";
+});
+let scrubbing = false; // while dragging, the loop must not fight the thumb
+scrub.addEventListener("pointerdown", () => (scrubbing = true));
+window.addEventListener("pointerup", () => (scrubbing = false));
+scrub.addEventListener("input", () => {
+  animT = parseFloat(scrub.value);
+});
+
+let outlineMat = null; // shared by all outline hulls, rebuilt per compile
+let edgeMat = null; // shared by all feature-edge lines, rebuilt per compile
+let ringMat = null; // shared by all selection rings, rebuilt per compile
+
+window.onCompiled = function (c) {
+  compiled = c;
+  lastResultsText = null;
+  const themeName = c.theme && SCENE_THEMES[c.theme] ? c.theme : "default";
+  const theme = SCENE_THEMES[themeName];
+  applyEnvironment(themeName);
+  applyView(c.view || "free");
+
+  for (const mesh of objectGroup.children) {
+    mesh.geometry.dispose(); // outline hulls share this geometry...
+    mesh.material.dispose();
+    for (const child of mesh.children) {
+      if (child.geometry !== mesh.geometry) child.geometry.dispose(); // ...edge lines don't
+    }
+  }
+  objectGroup.clear();
+  meshes.clear();
+  if (outlineMat) {
+    outlineMat.dispose();
+    outlineMat = null;
+  }
+  if (edgeMat) {
+    edgeMat.dispose();
+    edgeMat = null;
+  }
+  if (ringMat) {
+    ringMat.dispose();
+    ringMat = null;
+  }
+  if (theme.outline) {
+    outlineMat = new THREE.MeshBasicMaterial({ color: theme.outlineColor, side: THREE.BackSide });
+  }
+  if (theme.edges) {
+    edgeMat = new THREE.LineBasicMaterial({ color: theme.edges });
+  }
+  if (theme.ring) {
+    ringMat = new THREE.MeshBasicMaterial({
+      color: theme.ring, transparent: true, opacity: 0.8, side: THREE.DoubleSide,
+    });
+  }
+
+  // repeated copies share their template's palette slot (o.family)
+  const paletteSlot = new Map();
+  for (const o of c.objects) {
+    const k = o.family || o.name;
+    if (!paletteSlot.has(k)) paletteSlot.set(k, paletteSlot.size);
+  }
+
+  c.objects.forEach((o) => {
+    if (o.shape === "group" || o.shape === "marker") return; // frames & doorway markers: no geometry
+    const mesh = new THREE.Mesh(
+      geometryFor(o),
+      theme.material(resolveColor(o.color, paletteSlot.get(o.family || o.name), theme.palette), o),
+    );
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.userData.name = o.name;
+    if (o.track && o.track.paint && o.track.paint.length) {
+      // painted objects restyle per frame; remember the birth color —
+      // the core hands back null for "whatever the palette picked"
+      mesh.userData.painted = true;
+      mesh.userData.birthColor = mesh.material.color.clone();
+    }
+    if (theme.outline && o.shape !== "link") {
+      // inverted hull: same geometry, backfaces only, grown by an absolute
+      // amount per axis so thin objects get the same line weight as fat ones
+      // (links rescale every frame; their hull math doesn't apply)
+      const hull = new THREE.Mesh(mesh.geometry, outlineMat);
+      const g = theme.outline * 2;
+      hull.scale.set(
+        (o.dims.w + g) / o.dims.w,
+        (o.dims.h + g) / o.dims.h,
+        (o.dims.d + g) / o.dims.d,
+      );
+      mesh.add(hull);
+    }
+    if (theme.edges) {
+      // feature edges only (15° threshold): boxes and facets get line work,
+      // smooth curves stay clean and rely on the silhouette hull
+      mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry, 15), edgeMat));
+    }
+    if (theme.ring && o.shape !== "link") {
+      // selection ring at the unit's footprint, hugging its base; as a
+      // child it rides along with move/orbit for free
+      const r = Math.max(o.dims.w, o.dims.d) * 0.62;
+      const ring = new THREE.Mesh(new THREE.RingGeometry(r * 0.82, r, 40), ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = -o.dims.h / 2 + 0.02;
+      mesh.add(ring);
+    }
+    meshes.set(o.name, mesh);
+    objectGroup.add(mesh);
+  });
+
+  transport.hidden = c.duration === 0;
+  scrub.max = c.duration || 1;
+  if (animT > c.duration) animT = 0;
+
+  if (window.framePending) {
+    window.framePending = false;
+    frameScene();
+  }
+};
+
+// Fit the camera to the scene's t=0 bounds — a desk-sized scene and a
+// whole house both open filling the view. Only runs when a scene is
+// loaded wholesale, never while typing (the camera is the user's).
+function frameScene() {
+  if (!compiled || !compiled.objects.length) return;
+  const s = Schauplatz.sample(compiled, 0);
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  let any = false;
+  for (const o of s.objects) {
+    if (o.shape === "group" || o.shape === "marker") continue;
+    any = true;
+    const half = [o.dims.w / 2, o.dims.h / 2, o.dims.d / 2];
+    for (let i = 0; i < 3; i++) {
+      min[i] = Math.min(min[i], o.pos[i] - half[i]);
+      max[i] = Math.max(max[i], o.pos[i] + half[i]);
+    }
+  }
+  if (!any) return;
+  const center = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+  const radius = Math.max(1, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
+  controls.target.set(center[0], center[1], center[2]);
+  if (camera.isOrthographicCamera) {
+    const dv = VIEW_DIRS[currentView] || VIEW_DIRS.iso;
+    const dl = Math.hypot(dv[0], dv[1], dv[2]);
+    const dist = radius * 4 + 5;
+    camera.position.set(
+      center[0] + (dv[0] / dl) * dist,
+      center[1] + (dv[1] / dl) * dist,
+      center[2] + (dv[2] / dl) * dist,
+    );
+    camera.userData.halfH = radius * 1.15;
+    camera.far = dist * 4;
+    resize(); // apply the new frustum
+    return;
+  }
+  const d = radius * 2.2;
+  // same diagonal, slightly-elevated vantage as the default camera
+  camera.position.set(center[0] + d * 0.44, center[1] + d * 0.59, center[2] + d * 0.66);
+}
+
+// Sample the scene at the current time and push it into the meshes,
+// sight lines, and output panel (DOM only touched when answers change).
+const paintFrom = new THREE.Color(), paintTo = new THREE.Color();
+function applyTime() {
+  if (!compiled) return;
+  const s = Schauplatz.sample(compiled, animT);
+  for (const o of s.objects) {
+    const mesh = meshes.get(o.name);
+    if (!mesh) continue;
+    mesh.visible = o.present;
+    mesh.position.set(o.pos[0], o.pos[1], o.pos[2]);
+    mesh.rotation.set(o.rot[0] * DEG, o.rot[1] * DEG, o.rot[2] * DEG);
+    if (o.shape === "link") mesh.scale.set(1, o.len || 0, 1); // span the live endpoints
+    if (mesh.userData.painted) {
+      if (o.colorMix) {
+        // mid-fade: the core hands us {from, to, k}; lerping is ours
+        o.colorMix.from ? paintFrom.set(o.colorMix.from) : paintFrom.copy(mesh.userData.birthColor);
+        mesh.material.color.copy(paintFrom).lerp(paintTo.set(o.colorMix.to), o.colorMix.k);
+        mesh.userData.lastPaint = undefined;
+      } else if (mesh.userData.lastPaint !== (o.color || null)) {
+        mesh.userData.lastPaint = o.color || null;
+        o.color ? mesh.material.color.set(o.color) : mesh.material.color.copy(mesh.userData.birthColor);
+      }
+    }
+  }
+  rebuildSightLines(s.results);
+  const text = s.results.map((r) => r.text).join("\n");
+  if (text !== lastResultsText) {
+    lastResultsText = text;
+    renderResults(s.results);
+  }
+}
+
+// ------------------------------------------------------------- hover names
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let hovered = null;
+
+renderer.domElement.addEventListener("pointermove", (e) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster
+    .intersectObjects(objectGroup.children)
+    .filter((h) => h.object.visible && h.object.userData.name)[0]; // skip outline hulls
+
+  if (hovered && (!hit || hit.object !== hovered)) {
+    hovered.material.emissive.set(0x000000);
+    hovered = null;
+    hoverLabel.style.display = "none";
+  }
+  if (hit) {
+    hovered = hit.object;
+    hovered.material.emissive.set(0x222a38);
+    hoverLabel.textContent = hovered.userData.name;
+    hoverLabel.style.display = "block";
+    hoverLabel.style.left = e.clientX - view.getBoundingClientRect().left + 12 + "px";
+    hoverLabel.style.top = e.clientY - view.getBoundingClientRect().top + 12 + "px";
+  }
+});
+
+// ----------------------------------------------------------- axes gizmo
+// Off by default; labels speak the language's compass (north = −z).
+let axesGroup = null;
+
+function makeAxisLabel(text, color, pos) {
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 64;
+  const g = c.getContext("2d");
+  g.font = "bold 40px ui-monospace, Menlo, monospace";
+  g.textAlign = "center";
+  g.fillStyle = color;
+  g.fillText(text, 128, 46);
+  const spr = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false }),
+  );
+  spr.position.set(...pos);
+  spr.scale.set(1.1, 0.28, 1);
+  spr.renderOrder = 998;
+  return spr;
+}
+
+function setAxes(on) {
+  if (on && !axesGroup) {
+    axesGroup = new THREE.Group();
+    axesGroup.add(new THREE.AxesHelper(2)); // x red, y green, z blue
+    axesGroup.add(makeAxisLabel("x east", "#ff7070", [2.6, 0.05, 0]));
+    axesGroup.add(makeAxisLabel("y up", "#70e070", [0.15, 2.35, 0]));
+    axesGroup.add(makeAxisLabel("z south", "#7090ff", [0, 0.05, 2.5]));
+    scene.add(axesGroup);
+  }
+  if (axesGroup) axesGroup.visible = on;
+  axesBtn.classList.toggle("on", on);
+  localStorage.setItem("schauplatz-axes", on ? "1" : "0");
+}
+
+const axesBtn = document.getElementById("axes");
+axesBtn.addEventListener("click", () => setAxes(!(axesGroup && axesGroup.visible)));
+if (
+  localStorage.getItem("schauplatz-axes") === "1" ||
+  new URLSearchParams(location.search).get("axes") === "1"
+) {
+  setAxes(true);
+}
+
+// ------------------------------------------------------------ resize, loop
+function resize() {
+  const { clientWidth: w, clientHeight: h } = view;
+  renderer.setSize(w, h);
+  if (camera.isOrthographicCamera) {
+    const hh = camera.userData.halfH || 8;
+    camera.top = hh;
+    camera.bottom = -hh;
+    camera.left = -hh * (w / h);
+    camera.right = hh * (w / h);
+  } else {
+    camera.aspect = w / h;
+  }
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(view);
+resize();
+
+// with a clock declared, the transport reads story time ("5:12:00 / 5:45:00").
+// Seconds are ALWAYS shown here (unlike query text): constant-width text
+// keeps the slider track from resizing under a drag.
+function wallTime(t) {
+  const ck = compiled.clock;
+  const totalMin = ck.start + t / ck.minute;
+  let h = Math.floor(totalMin / 60);
+  let m = Math.floor(totalMin - h * 60);
+  let s = Math.round((totalMin - h * 60 - m) * 60);
+  if (s === 60) { s = 0; m += 1; }
+  if (m === 60) { m = 0; h += 1; }
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+let lastNow = null;
+renderer.setAnimationLoop((now) => {
+  controls.update();
+  // cap dt: a long frame (recompile hitch, tab switch) must nudge the
+  // playhead, not teleport it past the end and wrap it back to the start
+  const dt = lastNow === null ? 0 : Math.min(0.1, (now - lastNow) / 1000);
+  lastNow = now;
+
+  if (compiled && compiled.duration > 0 && playing && !scrubbing) {
+    animT = (animT + dt) % compiled.duration;
+    scrub.value = animT;
+  }
+  if (compiled && compiled.duration > 0) {
+    clock.textContent = compiled.clock
+      ? wallTime(animT) + " / " + wallTime(compiled.duration)
+      : animT.toFixed(2) + " / " + compiled.duration.toFixed(2) + "s";
+  }
+  applyTime();
+  renderer.render(scene, camera);
+});
+
+// first compile (module scripts run after the classic ones above)
+recompile();
+</script>
+
+</body>
+</html>

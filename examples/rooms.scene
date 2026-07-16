@@ -1,0 +1,20 @@
+// Rooms — `room` is sugar for a group of wall boxes; doors are real gaps.
+// A four-room house, mystery-o-matic style. Walls block sight lines;
+// aligned doorways let them through.
+
+room kitchen size(4 2.5 4) at(-2.2 0 -2.2) door(east) door(south 1.1)
+room bedroom size(4 2.5 4) at(2.2 0 -2.2) door(west) door(south 1.1)
+room lounge  size(4 2.5 4) at(-2.2 0 2.2) door(north 1.1) door(east)
+room bath    size(4 2.5 4) at(2.2 0 2.2) door(north 1.1) door(west)
+
+cylinder alice r(0.25) h(1.6) in(kitchen) at(-1 0.8 0) color(#c778c7)
+cylinder bruno r(0.25) h(1.6) in(bedroom) at(1 0.8 0) color(#5b8dd9)
+sphere vase r(0.2) in(lounge) at(1 0.2 1) color(tomato)
+
+// At t=0 alice really can see bruno — straight through both doorways.
+// Then she walks to the lounge, and the walls end her alibi.
+move alice by(1 0 0) over(1) after(1)    // step in line with her south door
+move alice by(0 0 3.4) over(2)           // through it, into the lounge
+
+? sees(alice bruno)
+? blocked-by(alice vase)

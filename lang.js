@@ -1,0 +1,2892 @@
+/*
+ * Schauplatz v0 — the language core.
+ *
+ * Pure JS, no dependencies, no rendering. compile(source) returns plain data:
+ *   { objects, results, errors }
+ * A renderer (three.js, or anything else) consumes that. Keeping this file
+ * free of the DOM and three.js is deliberate: the language should be
+ * portable to another host (Rust, etc.) by translating only this module.
+ */
+(function (global) {
+  "use strict";
+
+  const SHAPES = new Set(["box", "sphere", "cylinder"]);
+
+  const RELATIONS = new Set([
+    "on", "above", "below",
+    "left-of", "right-of", "in-front-of", "behind",
+  ]);
+
+  const DEFAULT_GAP = {
+    on: 0, above: 0.5, below: 0.5,
+    "left-of": 0.25, "right-of": 0.25, "in-front-of": 0.25, behind: 0.25,
+  };
+
+  const QUERIES = new Set(["overlaps", "distance", "sees", "blocked-by", "in", "adjacent"]);
+  const BOOLEAN_QUERIES = new Set(["sees", "overlaps", "in"]); // quantifiable / checkable
+
+  // Themes are a whole-scene rendering hint: zero semantic effect (bounds,
+  // sight lines, and queries ignore them). The core only validates the name
+  // and passes it through; renderers decide what a theme looks like.
+  const THEMES = new Set(["ink", "clay", "blueprint", "noir", "paper", "rts"]);
+
+  // Like themes, views are a whole-scene rendering hint with zero semantic
+  // effect: the projection and starting vantage the scene asks for.
+  const VIEWS = new Set(["iso", "top"]);
+
+  const EASES = {
+    linear: (t) => t,
+    in: (t) => t * t,
+    out: (t) => t * (2 - t),
+    "in-out": (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
+    bounce: (t) => {
+      const n1 = 7.5625, d1 = 2.75;
+      if (t < 1 / d1) return n1 * t * t;
+      if (t < 2 / d1) return n1 * (t -= 1.5 / d1) * t + 0.75;
+      if (t < 2.5 / d1) return n1 * (t -= 2.25 / d1) * t + 0.9375;
+      return n1 * (t -= 2.625 / d1) * t + 0.984375;
+    },
+  };
+
+  // ---------------------------------------------------------------- helpers
+
+  function splitArgs(s) {
+    s = s.trim();
+    return s ? s.split(/[\s,]+/) : [];
+  }
+
+  function num(tok) {
+    return /^-?(\d+\.?\d*|\.\d+)$/.test(tok) ? parseFloat(tok) : null;
+  }
+
+  function nums(args, count) {
+    if (args.length !== count) return null;
+    const out = args.map(num);
+    return out.some((n) => n === null) ? null : out;
+  }
+
+  // ---------------------------------------------------------------- parsing
+
+  const RESERVED = new Set([
+    ...SHAPES, "group", "room", "link", "part", "end", "move", "turn", "orbit", "walk", "paint", "time",
+    "theme", "clock", "check", "set",
+  ]);
+
+  // With a clock declared, h:mm tokens become valid absolute times and Nm
+  // tokens valid durations. Returns timeline seconds, or null if the token
+  // isn't a time form (callers fall back to plain numbers).
+  // Resolves one time token: a declared time name, h:mm (needs the
+  // clock), or Nm minutes. timeCtx = { clock, times } threads through
+  // every parser that accepts a time.
+  function wallTime(tok, timeCtx, err) {
+    const times = timeCtx && timeCtx.times;
+    if (times && times.has(tok)) return times.get(tok).value;
+    const clock = timeCtx && timeCtx.clock;
+    const abs = tok.match(/^(\d{1,2}):(\d{2})$/);
+    if (abs) {
+      if (!clock) {
+        err(`"${tok}" is a wall-clock time — declare one first, e.g. clock 4:00 minute(1)`);
+        return NaN;
+      }
+      const mins = parseInt(abs[1], 10) * 60 + parseInt(abs[2], 10);
+      if (parseInt(abs[2], 10) > 59) {
+        err(`"${tok}" isn't a time`);
+        return NaN;
+      }
+      const t = (mins - clock.start) * clock.minute;
+      if (t < 0) {
+        err(`"${tok}" is before the clock's start`);
+        return NaN;
+      }
+      return t;
+    }
+    const dur = tok.match(/^(\d+\.?\d*|\.\d+)m$/);
+    if (dur) {
+      if (!clock) {
+        err(`"${tok}" is a duration in minutes — declare a clock first, e.g. clock 4:00 minute(1)`);
+        return NaN;
+      }
+      return parseFloat(dur[1]) * clock.minute;
+    }
+    return null;
+  }
+
+  function parse(src) {
+    const objects = new Map(); // name -> object
+    const queries = [];
+    const anims = [];
+    const errors = [];
+    const parts = new Map(); // name -> { name, line, body: [{ line, lineNo }] }
+    const sets = new Map(); // name -> { name, line, members }
+    const times = new Map(); // name -> { name, tok, line, value } — named time facts
+    const goals = []; // ?- goal(...) — questions FOR THE RULES LAYER, data here
+    let theme = null; // { name, line }
+    let view = null; // { name, line }
+    let clock = null; // { start: minutes, minute: seconds-per-story-minute, line }
+
+    const stripped = src
+      .split("\n")
+      .map((raw) => raw.replace(/\/\/.*$/, "").trim());
+
+    // Pass 1 — lift out part definitions (part <name> ... end) and the
+    // clock. Both are collected before anything else parses, so statement
+    // order stays meaningless (a move may use 5:15 before the clock line).
+    const inPart = new Array(stripped.length).fill(false);
+    let cur = null;
+    let atDepth = 0; // pass 1 only tells at-block ends from part ends
+    stripped.forEach((line, i) => {
+      const lineNo = i + 1;
+      if (!cur && /^at\b/.test(line)) {
+        atDepth++; // the block itself parses in pass 2
+        return;
+      }
+      if (!cur && /^clock\b/.test(line)) {
+        inPart[i] = true; // consumed here, skipped by pass 2
+        const m = line.match(/^clock\s+(\d{1,2}):(\d{2})(?:\s+minute\(([^)]*)\))?$/);
+        if (!m || parseInt(m[2], 10) > 59) {
+          errors.push({ line: lineNo, msg: "expected: clock h:mm minute(seconds)? — e.g. clock 4:45 minute(0.5)" });
+          return;
+        }
+        if (clock) {
+          errors.push({ line: lineNo, msg: `clock is already set (line ${clock.line}) — one clock per scene` });
+          return;
+        }
+        const spm = m[3] !== undefined ? num(m[3]) : 1;
+        if (spm === null || spm <= 0) {
+          errors.push({ line: lineNo, msg: "minute(): expected one positive number — how many seconds a story-minute lasts" });
+          return;
+        }
+        clock = { start: parseInt(m[1], 10) * 60 + parseInt(m[2], 10), minute: spm, line: lineNo };
+        return;
+      }
+      if (!cur && /^time\b/.test(line)) {
+        // time <name> <h:mm|seconds> — a NAMED time fact ("time_of_death"),
+        // usable wherever a point in time goes. Collected order-free like
+        // the clock; resolved after pass 1 (the clock may come later).
+        inPart[i] = true;
+        const m = line.match(/^time\s+([A-Za-z_][\w-]*)\s+(\S+)$/);
+        if (!m) {
+          errors.push({ line: lineNo, msg: "expected: time <name> <h:mm or seconds> — e.g. time time_of_death 3:00" });
+        } else if (RESERVED.has(m[1])) {
+          errors.push({ line: lineNo, msg: `"${m[1]}" is a reserved word — pick another time name` });
+        } else if (times.has(m[1])) {
+          errors.push({ line: lineNo, msg: `time "${m[1]}" is already defined on line ${times.get(m[1]).line}` });
+        } else {
+          times.set(m[1], { name: m[1], tok: m[2], line: lineNo, value: null });
+        }
+        return;
+      }
+      if (/^part\b/.test(line)) {
+        inPart[i] = true;
+        if (cur) {
+          errors.push({ line: lineNo, msg: "part definitions can't nest" });
+          return;
+        }
+        const m = line.match(/^part\s+([A-Za-z_][\w-]*)$/);
+        if (!m) {
+          errors.push({ line: lineNo, msg: "expected: part <name>" });
+        } else if (RESERVED.has(m[1])) {
+          errors.push({ line: lineNo, msg: `"${m[1]}" is a reserved word — pick another part name` });
+        } else if (parts.has(m[1])) {
+          errors.push({
+            line: lineNo,
+            msg: `part "${m[1]}" is already defined on line ${parts.get(m[1]).line}`,
+          });
+        } else {
+          cur = { name: m[1], line: lineNo, body: [] };
+        }
+      } else if (line === "end") {
+        if (!cur && atDepth > 0) {
+          atDepth--; // closes an at-block; pass 2 handles it
+          return;
+        }
+        inPart[i] = true;
+        if (!cur) {
+          errors.push({ line: lineNo, msg: '"end" without a matching part or at block' });
+        } else if (!cur.body.length) {
+          errors.push({ line: cur.line, msg: `part "${cur.name}" is empty` });
+          cur = null;
+        } else {
+          parts.set(cur.name, cur);
+          cur = null;
+        }
+      } else if (cur) {
+        inPart[i] = true;
+        if (line) cur.body.push({ line, lineNo });
+      }
+    });
+    if (cur) {
+      errors.push({ line: cur.line, msg: `part "${cur.name}" is missing its end` });
+    }
+
+    // Resolve declared times now that the clock (if any) is known.
+    // Names bind LITERALS only: no chains, no arithmetic, no durations.
+    for (const tm of [...times.values()]) {
+      if (/^(\d+\.?\d*|\.\d+)m$/.test(tm.tok)) {
+        errors.push({ line: tm.line, msg: `time ${tm.name}: names a point in time — "${tm.tok}" is a duration` });
+        times.delete(tm.name);
+        continue;
+      }
+      let bad = false;
+      const w = wallTime(tm.tok, { clock, times: null }, (msg) => {
+        errors.push({ line: tm.line, msg: `time ${tm.name}: ${msg}` });
+        bad = true;
+      });
+      if (bad) { times.delete(tm.name); continue; }
+      const v = w !== null ? w : num(tm.tok);
+      if (v === null || v < 0) {
+        errors.push({ line: tm.line, msg: `time ${tm.name}: expected h:mm (with a clock) or seconds >= 0` });
+        times.delete(tm.name);
+      } else {
+        tm.value = v;
+      }
+    }
+    const timeCtx = { clock, times };
+
+    // Pass 2 — everything else
+    let block = null; // open `at <time>` block: { t, line }
+    stripped.forEach((line, i) => {
+      if (inPart[i] || !line) return;
+      const lineNo = i + 1;
+
+      // at <time> ... end — a TIME BLOCK: statements inside get the
+      // block's instant where they didn't state their own (explicit
+      // start/at/during always wins). Pure desugar: afterwards every
+      // statement stands alone, and order still means nothing.
+      if (/^at\b/.test(line)) {
+        if (block) {
+          errors.push({ line: lineNo, msg: `at blocks don't nest (block open since line ${block.line})` });
+          return;
+        }
+        const m = line.match(/^at\s+(\S+)$/);
+        if (!m) {
+          errors.push({ line: lineNo, msg: "expected: at <time> ... end — e.g. at 2:15" });
+          return;
+        }
+        let bad = false;
+        const w = wallTime(m[1], timeCtx, (msg) => {
+          errors.push({ line: lineNo, msg: `at: ${msg}` });
+          bad = true;
+        });
+        if (bad) return;
+        const t = w !== null ? w : num(m[1]);
+        if (t === null || t < 0) {
+          errors.push({ line: lineNo, msg: "at: expected a time >= 0 (h:mm, seconds, or a time name)" });
+          return;
+        }
+        block = { t, line: lineNo };
+        return;
+      }
+      if (line === "end") {
+        // pass 1 already vetted this end as an at-block's; after a
+        // nesting error block may be null — swallow either way
+        block = null;
+        return;
+      }
+      const blockAt = block ? block.t : null;
+
+      // ?- goal(Args) — a question for the RULES LAYER. The core carries
+      // it as data (compiled.goals); evaluation happens wherever an
+      // engine consumes the fact export. Deliberately unvalidated beyond
+      // shape: the goal's vocabulary belongs to the rules, not to us.
+      if (/^\?-/.test(line)) {
+        if (block) {
+          errors.push({ line: lineNo, msg: "goals ask the rules layer — they don't take a time block" });
+          return;
+        }
+        const body = line.slice(2).trim().replace(/\.$/, "");
+        if (!body) {
+          errors.push({ line: lineNo, msg: "expected: ?- goal(Args) — a question for the rules layer" });
+          return;
+        }
+        goals.push({ goal: body, line: lineNo });
+        return;
+      }
+
+      if (line.startsWith("?")) {
+        parseQuery(line.slice(1), lineNo, queries, errors, timeCtx, false, blockAt);
+      } else if (/^check\b/.test(line)) {
+        parseQuery(line.slice(5), lineNo, queries, errors, timeCtx, true, blockAt);
+      } else if (block && !/^(move|turn|orbit|walk|paint)\b/.test(line)) {
+        // a time block scopes EVENTS; things that exist are declared outside
+        errors.push({
+          line: lineNo,
+          msg: `only animations, queries and checks belong in an at block (open since line ${block.line}) — declare objects outside it`,
+        });
+      } else if (/^set\b/.test(line)) {
+        // set <name> <member> <member> ... — a named, non-spatial
+        // collection that queries can quantify over
+        const m = line.match(/^set\s+([A-Za-z_][\w-]*)\s+(.+)$/);
+        if (!m) {
+          errors.push({ line: lineNo, msg: "expected: set <name> <member> <member> ..." });
+        } else if (RESERVED.has(m[1])) {
+          errors.push({ line: lineNo, msg: `"${m[1]}" is a reserved word — pick another set name` });
+        } else if (sets.has(m[1])) {
+          errors.push({
+            line: lineNo,
+            msg: `set "${m[1]}" is already defined on line ${sets.get(m[1]).line}`,
+          });
+        } else {
+          const members = splitArgs(m[2]);
+          if (members.some((x) => num(x) !== null)) {
+            errors.push({ line: lineNo, msg: "set members are object names" });
+          } else {
+            sets.set(m[1], { name: m[1], line: lineNo, members });
+          }
+        }
+      } else if (/^(move|turn|orbit|walk|paint)\b/.test(line)) {
+        parseAnim(line, lineNo, anims, errors, timeCtx, blockAt);
+      } else if (/^theme\b/.test(line)) {
+        const m = line.match(/^theme\s+([A-Za-z_][\w-]*)$/);
+        if (!m) {
+          errors.push({ line: lineNo, msg: "expected: theme <name>" });
+        } else if (!THEMES.has(m[1])) {
+          errors.push({
+            line: lineNo,
+            msg: `unknown theme "${m[1]}" (available: ${[...THEMES].join(", ")})`,
+          });
+        } else if (theme) {
+          errors.push({
+            line: lineNo,
+            msg: `theme is already "${theme.name}" (line ${theme.line}) — one theme per scene`,
+          });
+        } else {
+          theme = { name: m[1], line: lineNo };
+        }
+      } else if (/^view\b/.test(line)) {
+        const m = line.match(/^view\s+([A-Za-z_][\w-]*)$/);
+        if (!m) {
+          errors.push({ line: lineNo, msg: "expected: view <name>" });
+        } else if (!VIEWS.has(m[1])) {
+          errors.push({
+            line: lineNo,
+            msg: `unknown view "${m[1]}" (available: ${[...VIEWS].join(", ")}; omit for free perspective)`,
+          });
+        } else if (view) {
+          errors.push({
+            line: lineNo,
+            msg: `view is already "${view.name}" (line ${view.line}) — one view per scene`,
+          });
+        } else {
+          view = { name: m[1], line: lineNo };
+        }
+      } else {
+        parseStatement(line, lineNo, objects, errors, { parts, anims, timeCtx });
+      }
+    });
+    if (block) {
+      errors.push({ line: block.line, msg: "at block is missing its end" });
+    }
+
+    // a time name that shadows an object or set would read ambiguously
+    for (const tm of times.values()) {
+      const other = objects.get(tm.name) || sets.get(tm.name);
+      if (other) {
+        errors.push({
+          line: tm.line,
+          msg: `time "${tm.name}" collides with the ${objects.has(tm.name) ? "object" : "set"} of that name (line ${other.line})`,
+        });
+      }
+    }
+
+    return {
+      objects, queries, anims, errors, sets, goals,
+      theme: theme ? theme.name : null,
+      view: view ? view.name : null,
+      clock: clock ? { start: clock.start, minute: clock.minute } : null,
+      times: new Map([...times].map(([k, v]) => [k, v.value])),
+    };
+  }
+
+  function parseAnim(line, lineNo, anims, errors, timeCtx, blockAt) {
+    const err = (msg) => errors.push({ line: lineNo, msg });
+
+    const m = line.match(/^(move|turn|orbit|walk|paint)\s+([A-Za-z_][\w-]*)\s*(.*)$/);
+    if (!m) {
+      err("expected: move <name> to(x y z) over(seconds) ...");
+      return;
+    }
+    const [, kind, target, rest] = m;
+    const a = {
+      kind, target, line: lineNo,
+      // paint snaps by default (a light changes, it doesn't smear);
+      // spatial verbs default to a 1-second glide
+      to: null, by: null, from: null, start: null, after: null,
+      over: kind === "paint" ? 0 : 1, ease: "linear",
+      around: null, axis: "y", // orbit only
+    };
+
+    // one time argument: a number, a named time, or (with a clock) 5:15 / 2m
+    const timeArg = (args, key) => {
+      if (args.length !== 1) return null;
+      const w = wallTime(args[0], timeCtx, (msg) => err(`${key}(): ${msg}`));
+      if (Number.isNaN(w)) return NaN; // wallTime already reported
+      if (w !== null) return w;
+      return num(args[0]);
+    };
+
+    let r = rest;
+    while (r.length) {
+      const pm = r.match(/^([A-Za-z_][\w-]*)\(([^)]*)\)\s*/);
+      if (!pm) {
+        err(`can't read "${r}" — properties look like name(args)`);
+        return;
+      }
+      const key = pm[1];
+      const args = splitArgs(pm[2]);
+      r = r.slice(pm[0].length);
+
+      switch (key) {
+        case "to": {
+          if (kind === "orbit") return err("orbit uses around() and by(degrees), not to()");
+          if (kind === "paint") {
+            // to(color) — one color name or #hex, same tokens color() takes
+            if (args.length !== 1) return err("paint to(): expected one color name or #hex");
+            a.to = args[0];
+            break;
+          }
+          // to(x y z), to(name), or to(name dx dz / dx dy dz) — a named
+          // object's placed position, optionally slid by an offset
+          if (args.length >= 1 && num(args[0]) === null) {
+            if (kind === "turn") return err("turn to(): expected 3 numbers (degrees)");
+            a.to = { ref: args[0] };
+            if (args.length > 1) {
+              const off = nums(args.slice(1), kind === "walk" ? 2 : 3);
+              if (!off) {
+                return err(
+                  kind === "walk"
+                    ? "to(name dx dz): expected 2 numbers after the name"
+                    : "to(name dx dy dz): expected 3 numbers after the name",
+                );
+              }
+              a.to.off = off;
+            }
+            break;
+          }
+          // walk moves on the ground plane: x z only, height stays yours
+          const v = nums(args, kind === "walk" ? 2 : 3);
+          if (!v) {
+            return err(
+              kind === "walk" ? "to(): walk expects x z, or one name" : "to(): expected 3 numbers or one object name",
+            );
+          }
+          a.to = v;
+          break;
+        }
+        case "by": {
+          if (kind === "paint") return err("paint has no by() — colors don't add; use to(color)");
+          if (kind === "orbit") {
+            const v = nums(args, 1);
+            if (!v) return err("by(): orbit expects one number (degrees of arc)");
+            a.by = v;
+            break;
+          }
+          const v = nums(args, kind === "walk" ? 2 : 3);
+          if (!v) return err(kind === "walk" ? "by(): walk expects dx dz" : "by(): expected 3 numbers");
+          a.by = v;
+          break;
+        }
+        case "from": {
+          if (kind === "paint") return err("paint chains from the previous color — it has no from()");
+          const v = nums(args, kind === "walk" ? 2 : 3);
+          if (!v) return err(kind === "walk" ? "from(): walk expects x z" : "from(): expected 3 numbers");
+          a.from = v;
+          break;
+        }
+        case "around": {
+          // around(x y z), or around(name) — the circle's center
+          if (kind !== "orbit") return err(`around(): only orbit has around()`);
+          if (args.length === 1 && num(args[0]) === null) {
+            a.around = { ref: args[0] };
+            break;
+          }
+          const v = nums(args, 3);
+          if (!v) return err("around(): expected 3 numbers or one object name");
+          a.around = v;
+          break;
+        }
+        case "axis": {
+          if (kind !== "orbit") return err(`axis(): only orbit has axis()`);
+          if (args.length !== 1 || !["x", "y", "z"].includes(args[0])) {
+            return err("axis(): one of x, y, z");
+          }
+          a.axis = args[0];
+          break;
+        }
+        case "start": {
+          const v = timeArg(args, "start");
+          if (Number.isNaN(v)) return; // time error already reported
+          if (v === null || v < 0) return err("start(): expected a time >= 0 (or 5:15 with a clock)");
+          a.start = v;
+          break;
+        }
+        case "after": case "over": {
+          if (args.length === 1 && /:/.test(args[0])) {
+            return err(`${key}(): takes a duration, not a clock time — use ${key}(2m) or seconds`);
+          }
+          if (args.length === 1 && timeCtx && timeCtx.times.has(args[0])) {
+            return err(`${key}(): takes a duration — "${args[0]}" names a point in time`);
+          }
+          const v = timeArg(args, key);
+          if (Number.isNaN(v)) return;
+          // over(0) is the LEAP: "was there at that time", no path, no
+          // invented route — testimony placement, honest about the gap
+          if (v === null || v < 0) {
+            return err(`${key}(): expected a non-negative duration in seconds (or 2m with a clock)`);
+          }
+          a[key] = v;
+          break;
+        }
+        case "ease": {
+          if (args.length !== 1 || !(args[0] in EASES)) {
+            return err(`ease(): one of ${Object.keys(EASES).join(", ")}`);
+          }
+          a.ease = args[0];
+          break;
+        }
+        default:
+          return err(`${key}(): unknown property for ${kind}`);
+      }
+    }
+
+    if (kind === "orbit") {
+      if (!a.around) return err("orbit needs around(): a center point or object");
+      if (!a.by) return err("orbit needs by(degrees): the arc to sweep");
+    } else if (kind === "paint") {
+      if (!a.to) return err("paint needs to(color)");
+    } else {
+      if (!a.to && !a.by) return err(`${kind} needs a destination: to() or by()`);
+      if (a.to && a.by) return err("use to() or by(), not both");
+    }
+    if (a.start !== null && a.after !== null) {
+      return err("use start(t) or after(s), not both");
+    }
+    // inside an at block: fill the block's instant where the statement
+    // stated no time of its own — explicit start/after always wins
+    if (blockAt != null && a.start === null && a.after === null) {
+      a.start = blockAt;
+    }
+    anims.push(a);
+  }
+
+  // Parses the body of `? ...` queries and `check ...` assertions — the
+  // same grammar: [quant] fn(args) [at(t) | during(t1 t2)].
+  function parseQuery(body, lineNo, queries, errors, timeCtx, isCheck, blockAt) {
+    const err = (msg) => errors.push({ line: lineNo, msg });
+    const m = body
+      .trim()
+      .match(/^(?:(ever|always|when|never)\s+)?([A-Za-z_][\w-]*)\(([^)]*)\)\s*(.*)$/);
+    if (!m) {
+      return err(
+        isCheck
+          ? "expected: check ever|always|never name(a b), or check name(a b) at(time)"
+          : "bad query — expected: ? name(a b) or ? ever name(a b)",
+      );
+    }
+    const [, quant, fn, rawArgs, trailing] = m;
+    if (!QUERIES.has(fn)) {
+      return err(`unknown query "${fn}" (available: ${[...QUERIES].join(", ")})`);
+    }
+
+    let at = null;
+    let during = null;
+    let except = null;
+    let r = trailing;
+    while (r.length) {
+      const pm = r.match(/^([A-Za-z_][\w-]*)\(([^)]*)\)\s*/);
+      if (!pm) return err(`can't read "${r}" — properties look like name(args)`);
+      const key = pm[1];
+      const args = splitArgs(pm[2]);
+      r = r.slice(pm[0].length);
+      const time = (tok) => {
+        const w = wallTime(tok, timeCtx, (msg) => err(`${key}(): ${msg}`));
+        if (Number.isNaN(w)) return NaN;
+        return w !== null ? w : num(tok);
+      };
+      if (key === "at") {
+        if (args.length !== 1) return err("at(): expected one time");
+        const t = time(args[0]);
+        if (Number.isNaN(t)) return;
+        if (t === null || t < 0) return err("at(): expected a time >= 0 (or 2:30 with a clock)");
+        at = t;
+      } else if (key === "during") {
+        if (args.length !== 2) return err("during(): expected two times: during(start end)");
+        const t0 = time(args[0]);
+        const t1 = time(args[1]);
+        if (Number.isNaN(t0) || Number.isNaN(t1)) return;
+        if (t0 === null || t1 === null || t0 < 0 || t1 <= t0) {
+          return err("during(): expected two increasing times");
+        }
+        during = [t0, t1];
+      } else if (key === "except") {
+        if (!args.length || args.some((x) => num(x) !== null)) {
+          return err("except(): expected object names to leave out of a set");
+        }
+        except = args;
+      } else {
+        return err(`${key}(): queries take at(time), during(start end) or except(names)`);
+      }
+    }
+
+    // inside an at block: fill the block's instant where the query stated
+    // no time scope of its own. A quantifier IS a time scope (so ever/
+    // always/when keep their own timeline; never combines, as instant
+    // negation), and adjacent has no time at all.
+    if (blockAt != null && fn !== "adjacent" && at === null && during === null && (!quant || quant === "never")) {
+      at = blockAt;
+    }
+
+    if (fn === "adjacent") {
+      // a fact about the floor plan: it doesn't change, so time words
+      // don't apply — and it's checkable bare
+      if (quant) return err("adjacent() is a fact about the floor plan — it takes no quantifier");
+      if (at !== null || during) return err("adjacent() doesn't change over time — drop at()/during()");
+      if (except) return err("except() needs a set argument");
+      queries.push({
+        line: lineNo, fn, quant: null, args: splitArgs(rawArgs),
+        at: null, during: null, except: null, check: !!isCheck,
+      });
+      return;
+    }
+    if (quant && !BOOLEAN_QUERIES.has(fn)) {
+      return err(`${quant} works with the true/false queries — ${[...BOOLEAN_QUERIES].join(", ")}`);
+    }
+    if (quant && at !== null && quant !== "never") {
+      return err(
+        "use a quantifier or at(time), not both — except never, which asserts the opposite at that instant",
+      );
+    }
+    if (during && !quant) return err("during() needs ever, always, never or when");
+    if (isCheck) {
+      if (quant === "when") {
+        return err("check needs a true/false answer — ever, always, never, or at(time)");
+      }
+      if (!quant && at === null) return err("check needs ever/always/never, or at(time)");
+      if (at !== null && !BOOLEAN_QUERIES.has(fn)) {
+        return err(`check needs a true/false query — ${[...BOOLEAN_QUERIES].join(", ")}`);
+      }
+    }
+    queries.push({
+      line: lineNo, fn, quant: quant || null, args: splitArgs(rawArgs),
+      at, during, except, check: !!isCheck,
+    });
+  }
+
+  function parseStatement(line, lineNo, objects, errors, ctx) {
+    const err = (msg) => errors.push({ line: lineNo, msg });
+
+    const stmt = line.match(/^([A-Za-z_][\w-]*)\s+([A-Za-z_][\w-]*)\s*(.*)$/);
+    if (!stmt) {
+      err("expected: <shape> <name> <properties...>");
+      return;
+    }
+    const [, shape, name, rest] = stmt;
+
+    const partDef = ctx && ctx.parts && ctx.parts.get(shape);
+    if (!SHAPES.has(shape) && shape !== "group" && shape !== "room" && shape !== "link" && !partDef) {
+      if (ctx && ctx.nestedFrom && ctx.nestedFrom.has(shape)) {
+        err(`parts can't use other parts (yet) — "${shape}" must be spelled out here`);
+        return;
+      }
+      const known = [...SHAPES].join(", ") + ", group, room";
+      const partNames = ctx && ctx.parts && ctx.parts.size ? ", " + [...ctx.parts.keys()].join(", ") : "";
+      err(`unknown shape "${shape}" (available: ${known}${partNames})`);
+      return;
+    }
+    if (objects.has(name)) {
+      err(`"${name}" is already defined on line ${objects.get(name).line}`);
+      return;
+    }
+
+    // Pull off property calls one at a time: key(args) key(args) ...
+    const props = [];
+    let r = rest;
+    while (r.length) {
+      const m = r.match(/^([A-Za-z_][\w-]*)\(([^)]*)\)\s*/);
+      if (!m) {
+        err(`can't read "${r}" — properties look like name(args)`);
+        return;
+      }
+      props.push({ key: m[1], args: splitArgs(m[2]) });
+      r = r.slice(m[0].length);
+    }
+
+    const timeCtx = ctx && ctx.timeCtx;
+    if (shape === "room") {
+      makeRoom(name, props, lineNo, objects, err, timeCtx);
+      return;
+    }
+    if (partDef) {
+      makeInstance(partDef, name, props, lineNo, objects, ctx.anims, errors, ctx.parts, timeCtx);
+      return;
+    }
+
+    const obj = {
+      name, shape, line: lineNo,
+      size: shape === "box" ? [1, 1, 1] : null,
+      r: shape === "box" ? null : shape === "link" ? 0.05 : 0.5,
+      h: shape === "cylinder" ? 1 : null,
+      sides: null, // cylinder only: faceted prism instead of smooth
+      at: null, rel: null,
+      rot: [0, 0, 0],
+      color: null,
+      appear: 0, vanish: null, // lifetime window [appear, vanish)
+      parent: null, // group membership via in(name)
+      repeat: null, spread: null, jitter: null, seed: null, stagger: null,
+      between: null, // link only: the two endpoints it spans
+    };
+
+    for (const p of props) {
+      if (!applyProp(obj, p, err, timeCtx)) return;
+    }
+
+    if (obj.at && obj.rel) {
+      err(`"${name}": use at() or a placement relation, not both`);
+      return;
+    }
+    if (obj.vanish !== null && obj.vanish <= obj.appear) {
+      err(`"${name}": vanish(${obj.vanish}) must come after appear(${obj.appear})`);
+      return;
+    }
+    if (!obj.repeat && (obj.spread || obj.jitter || obj.stagger !== null)) {
+      err(`"${name}": spread/jitter/stagger only make sense with repeat(n)`);
+      return;
+    }
+    if (obj.shape === "link" && !obj.between) {
+      err(`"${name}": a link needs between(a b) — the two things it spans`);
+      return;
+    }
+
+    objects.set(name, obj);
+  }
+
+  // ------------------------------------------------------------------ parts
+  //
+  // A part teaches the language a new noun: "a desk consists of ..." — a
+  // fixed arrangement of facts (objects and animations), defined once with
+  // `part <name> ... end` and used exactly like a shape. No parameters, no
+  // arithmetic, no conditionals — that is a hard line; the sanctioned knob
+  // is uniform per-instance scale(), which is BAKED here at parse time
+  // (positions, sizes, gaps, movement vectors all multiply by s), so the
+  // core never learns about scaling and instances are ordinary groups.
+  // Bodies are self-contained: referencing a name from outside is an error.
+
+  function makeInstance(def, instName, props, lineNo, objects, anims, errors, allParts, timeCtx) {
+    const err = (msg) => errors.push({ line: lineNo, msg });
+    const group = {
+      name: instName, shape: "group", line: lineNo,
+      size: null, r: null, h: null, sides: null,
+      at: null, rel: null, rot: [0, 0, 0], color: null,
+      appear: 0, vanish: null, parent: null,
+      repeat: null, spread: null, jitter: null, seed: null, stagger: null,
+    };
+    let s = 1;
+    let tint = null; // instance color() fills members that don't set their own
+
+    for (const p of props) {
+      if (p.key === "scale") {
+        const v = nums(p.args, 1);
+        if (!v || v[0] <= 0) return err("scale(): expected one positive number");
+        s = v[0];
+      } else if (p.key === "color") {
+        if (p.args.length !== 1) return err("color(): expected one color name or #hex");
+        tint = p.args[0];
+      } else if (!applyProp(group, p, err, timeCtx)) {
+        return;
+      }
+    }
+    if (group.at && group.rel) {
+      return err(`"${instName}": use at() or a placement relation, not both`);
+    }
+    if (group.vanish !== null && group.vanish <= group.appear) {
+      return err(`"${instName}": vanish(${group.vanish}) must come after appear(${group.appear})`);
+    }
+
+    // parse the body fresh for this instance, into its own namespace
+    const body = new Map();
+    const bodyAnims = [];
+    for (const b of def.body) {
+      if (b.line.startsWith("?")) {
+        errors.push({ line: b.lineNo, msg: "queries don't belong inside a part" });
+      } else if (/^theme\b/.test(b.line)) {
+        errors.push({ line: b.lineNo, msg: "theme doesn't belong inside a part" });
+      } else if (/^(move|turn|orbit|walk|paint)\b/.test(b.line)) {
+        parseAnim(b.line, b.lineNo, bodyAnims, errors, timeCtx);
+      } else {
+        parseStatement(b.line, b.lineNo, body, errors, { nestedFrom: allParts, timeCtx });
+      }
+    }
+
+    // bake scale: the core never sees s, only scaled facts
+    if (s !== 1) {
+      for (const o of body.values()) {
+        if (o.at) {
+          o.at = o.at.ref
+            ? { ...o.at, dx: o.at.dx * s, dz: o.at.dz * s }
+            : o.at.map((v) => v * s);
+        }
+        if (o.size) o.size = o.size.map((v) => v * s);
+        if (o.r !== null) o.r *= s;
+        if (o.h !== null) o.h *= s;
+        if (o.rel) {
+          const target = body.get(o.rel.target);
+          const gap = o.rel.gap !== null
+            ? o.rel.gap
+            : o.room && target && target.room ? 0 : DEFAULT_GAP[o.rel.kind];
+          o.rel = { ...o.rel, gap: gap * s };
+        }
+        if (o.spread) o.spread = o.spread.map((v) => v * s);
+        if (o.jitter) o.jitter = o.jitter.map((v) => v * s);
+        if (o.room) {
+          o.room = {
+            ...o.room,
+            size: o.room.size.map((v) => v * s),
+            thick: o.room.thick * s,
+            doors: Object.fromEntries(
+              Object.entries(o.room.doors).map(([k, ds]) => [
+                k, ds.map((d) => ({ width: d.width * s, offset: d.offset * s })),
+              ]),
+            ),
+            autos: o.room.autos.map((a) => ({ ...a, width: a.width * s })),
+          };
+        }
+      }
+      for (const a of bodyAnims) {
+        if (a.kind === "turn") continue; // degrees don't scale
+        if (a.from) a.from = a.from.map((v) => v * s);
+        if (a.kind === "move" || a.kind === "walk") {
+          if (a.to && !a.to.ref) a.to = a.to.map((v) => v * s);
+          if (a.to && a.to.off) a.to.off = a.to.off.map((v) => v * s);
+          if (a.by) a.by = a.by.map((v) => v * s);
+        } else if (a.kind === "orbit" && a.around && !a.around.ref) {
+          a.around = a.around.map((v) => v * s); // by() is degrees: unscaled
+        }
+      }
+    }
+
+    // transfer into the scene: prefix names, remap internal references
+    const mapping = new Map([...body.keys()].map((n) => [n, instName + "-" + n]));
+    for (const nm of mapping.values()) {
+      if (objects.has(nm)) {
+        return err(
+          `${def.name} "${instName}" creates "${nm}", but that name is taken (line ${objects.get(nm).line})`,
+        );
+      }
+    }
+    // validate self-containment fully before transferring anything
+    let ok = true;
+    const contained = (b, what, ref) => {
+      if (mapping.has(ref)) return true;
+      errors.push({
+        line: b.line,
+        msg: `part "${def.name}" is self-contained — ${what}("${ref}") must name something defined in the part`,
+      });
+      ok = false;
+      return false;
+    };
+    for (const o of body.values()) {
+      if (o.parent) contained(o, "in", o.parent);
+      if (o.rel) contained(o, o.rel.kind, o.rel.target);
+      if (o.rel && o.rel.target2) contained(o, o.rel.kind, o.rel.target2);
+      if (o.at && o.at.ref) contained(o, "at", o.at.ref);
+      if (o.between) for (const en of o.between) contained(o, "between", en);
+      if (o.room) for (const a of o.room.autos) contained(o, "door(to ", a.target);
+    }
+    for (const a of bodyAnims) {
+      contained(a, a.kind, a.target);
+      const ref = (a.to && a.to.ref) || (a.around && a.around.ref);
+      if (ref) contained(a, "to/around", ref);
+    }
+    if (!ok) return;
+
+    for (const o of body.values()) {
+      objects.set(mapping.get(o.name), {
+        ...o,
+        name: mapping.get(o.name),
+        parent: o.parent ? mapping.get(o.parent) : instName,
+        at: o.at && o.at.ref ? { ...o.at, ref: mapping.get(o.at.ref) } : o.at,
+        rel: o.rel
+          ? {
+              ...o.rel,
+              target: mapping.get(o.rel.target),
+              target2: o.rel.target2 ? mapping.get(o.rel.target2) : null,
+            }
+          : null,
+        between: o.between ? o.between.map((en) => mapping.get(en)) : null,
+        room: o.room
+          ? { ...o.room, autos: o.room.autos.map((a) => ({ ...a, target: mapping.get(a.target) })) }
+          : undefined,
+        color: o.color === null ? tint : o.color,
+        family: def.name + "/" + (o.family || o.name), // instances share palette slots
+      });
+    }
+    for (const a of bodyAnims) {
+      const c = { ...a, target: mapping.get(a.target) };
+      if (a.to && a.to.ref) c.to = { ...a.to, ref: mapping.get(a.to.ref) };
+      if (a.around && a.around.ref) c.around = { ref: mapping.get(a.around.ref) };
+      anims.push(c);
+    }
+    objects.set(instName, group);
+  }
+
+  // ------------------------------------------------------------------ rooms
+  //
+  // `room` is pure syntactic sugar: it desugars, at parse time, into the
+  // group-of-wall-boxes you would have written by hand. Nothing downstream
+  // learns anything new — walls block sight lines because they are boxes,
+  // doorways let them through because they are real gaps, and the room is a
+  // group (query endpoint, never a blocker; relation target from outside).
+  // size() is the INTERIOR; walls extrude outward. No floor, no ceiling —
+  // the ground is the floor and the camera looks in from above.
+
+  function makeRoom(name, props, lineNo, objects, err, timeCtx) {
+    const group = {
+      name, shape: "group", line: lineNo,
+      size: null, r: null, h: null, sides: null,
+      at: null, rel: null, rot: [0, 0, 0], color: null,
+      appear: 0, vanish: null, parent: null,
+    };
+    let size = [4, 2.5, 4];
+    let thick = 0.2;
+    let color = "#5b6575";
+    const doors = { north: [], south: [], east: [], west: [] };
+    const autos = []; // door(to <room>): carved after positions resolve
+
+    for (const p of props) {
+      switch (p.key) {
+        case "size": {
+          const v = nums(p.args, 3);
+          if (!v || v.some((n) => n <= 0)) {
+            return err("size(): expected 3 positive numbers — the interior w h d");
+          }
+          size = v;
+          break;
+        }
+        case "walls": {
+          const v = nums(p.args, 1);
+          if (!v || v[0] <= 0) return err("walls(): expected one positive number (thickness)");
+          thick = v[0];
+          break;
+        }
+        case "color": {
+          if (p.args.length !== 1) return err("color(): expected one color name or #hex");
+          color = p.args[0];
+          break;
+        }
+        case "door": {
+          const [side, ...rest] = p.args;
+          if (side === "to") {
+            // door(to <room> <width?>): a shared, auto-aligned opening —
+            // declared once, carved into BOTH rooms after positions resolve
+            const target = rest[0];
+            const width = rest.length > 1 ? num(rest[1]) : 1;
+            if (!target || num(target) !== null || rest.length > 2 || width === null || width <= 0) {
+              return err("door(): expected door(to <room>) or door(to <room> <width>)");
+            }
+            autos.push({ target, width, line: lineNo });
+            break;
+          }
+          if (!(side in doors)) {
+            return err("door(): first argument is a side (north, south, east, west) or `to`");
+          }
+          const width = rest.length > 0 ? num(rest[0]) : 1;
+          const offset = rest.length > 1 ? num(rest[1]) : 0;
+          if (rest.length > 2 || width === null || width <= 0 || offset === null) {
+            return err("door(): expected door(side width? offset?)");
+          }
+          doors[side].push({ width, offset });
+          break;
+        }
+        default:
+          // at/rotate/in/appear/vanish/relations behave exactly as on a group
+          if (!applyProp(group, p, err, timeCtx)) return;
+      }
+    }
+
+    if (group.at && group.rel) {
+      return err(`"${name}": use at() or a placement relation, not both`);
+    }
+    if (group.vanish !== null && group.vanish <= group.appear) {
+      return err(`"${name}": vanish(${group.vanish}) must come after appear(${group.appear})`);
+    }
+
+    // All door carving happens after resolution (carveDoors): door(to)
+    // needs resolved positions, and a counterpart opening may be carved
+    // into a room that declared no doors of its own — so rooms always
+    // emit whole walls here and get their doorways cut in one pass later.
+    const members = [];
+    for (const wl of roomWalls(size, thick)) {
+      members.push(...wallBoxes(name, wl, [[-wl.span / 2, wl.span / 2]], size[1], thick, color, lineNo, group));
+    }
+
+    for (const m of members) {
+      if (objects.has(m.name)) {
+        return err(
+          `room "${name}" creates a wall named "${m.name}", but that name is taken (line ${objects.get(m.name).line})`,
+        );
+      }
+    }
+    group.room = { size, thick, color, doors, autos };
+    objects.set(name, group);
+    for (const m of members) objects.set(m.name, m);
+  }
+
+  // the four walls of an interior w×h×d with thickness t, in local coords:
+  // north/south span the corners; east/west fit exactly between them
+  function roomWalls(size, thick) {
+    const [w, , d] = size;
+    return [
+      { side: "north", along: "x", span: w + 2 * thick, x: 0, z: -(d + thick) / 2 },
+      { side: "south", along: "x", span: w + 2 * thick, x: 0, z: (d + thick) / 2 },
+      { side: "east", along: "z", span: d, x: (w + thick) / 2, z: 0 },
+      { side: "west", along: "z", span: d, x: -(w + thick) / 2, z: 0 },
+    ];
+  }
+
+  // A wall with doors becomes segments; a door is the absence of wall.
+  function wallSegments(span, ds, side, err) {
+    if (!ds.length) return [[-span / 2, span / 2]];
+    const sorted = ds.slice().sort((a, b) => a.offset - b.offset);
+    const segs = [];
+    let cursor = -span / 2;
+    for (const door of sorted) {
+      const lo = door.offset - door.width / 2;
+      const hi = door.offset + door.width / 2;
+      if (lo < -span / 2 - 1e-9 || hi > span / 2 + 1e-9) {
+        err(`door(): the ${side} door (width ${door.width}, offset ${door.offset}) doesn't fit — that wall runs ${span} across`);
+        return null;
+      }
+      if (lo < cursor - 1e-9) {
+        err(
+          `door(): doors overlap on the ${side} wall — a door is door(side width offset), and offset defaults to 0 (centered), so two doors need two offsets`,
+        );
+        return null;
+      }
+      if (lo - cursor > 1e-6) segs.push([cursor, lo]);
+      cursor = hi;
+    }
+    if (span / 2 - cursor > 1e-6) segs.push([cursor, span / 2]);
+    return segs;
+  }
+
+  function wallBoxes(roomName, wl, segs, h, thick, color, lineNo, group) {
+    return segs.map(([lo, hi], i) => {
+      const len = hi - lo;
+      const mid = (lo + hi) / 2;
+      return {
+        name: `${roomName}-${wl.side}${segs.length === 1 ? "" : "-" + (i + 1)}`,
+        shape: "box", line: lineNo,
+        size: wl.along === "x" ? [len, h, thick] : [thick, h, len],
+        r: null, h: null, sides: null,
+        at: wl.along === "x" ? [mid, h / 2, wl.z] : [wl.x, h / 2, mid],
+        rel: null, rot: [0, 0, 0], color,
+        appear: group ? group.appear : 0, vanish: group ? group.vanish : null,
+        parent: roomName,
+      };
+    });
+  }
+
+  // ------------------------------------------------- shared doors (door-to)
+  //
+  // Runs after resolution, when room positions are known. Each door(to X)
+  // finds the facing walls, checks the rooms really touch, centers a door
+  // on the shared stretch, and carves BOTH rooms — one declared fact, two
+  // aligned openings. Declaring the same connection from both rooms is the
+  // same fact twice (fine, if the widths agree).
+  // Carves all doors (manual + shared), emits doorway markers, and returns
+  // the ADJACENCY set: every pair of rooms a door(to) actually connected,
+  // as sorted "a|b" keys. Manual one-sided doors declare no adjacency —
+  // they don't say who is on the other side.
+  function carveDoors(objects, errors) {
+    const rooms = [...objects.values()].filter((o) => o.room);
+    if (!rooms.length) return new Set();
+
+    // per-room pending door lists, seeded with the manual doors
+    const pending = new Map(rooms.map((r) => [r.name, {
+      north: [...r.room.doors.north], south: [...r.room.doors.south],
+      east: [...r.room.doors.east], west: [...r.room.doors.west],
+    }]));
+    const seen = new Map(); // "a|b" -> width
+    const connections = []; // shared doors, for marker placement
+
+    const OPP = { north: "south", south: "north", east: "west", west: "east" };
+    for (const rm of rooms) {
+      for (const auto of rm.room.autos) {
+        const fail = (msg) => errors.push({ line: auto.line, msg });
+        const t = objects.get(auto.target);
+        if (!t) { fail(`door(to): no room named "${auto.target}"`); continue; }
+        if (!t.room) { fail(`door(to): "${auto.target}" is not a room`); continue; }
+        if ((t.parent || null) !== (rm.parent || null)) {
+          fail(`door(to): "${auto.target}" is in a different frame — connected rooms must be siblings`);
+          continue;
+        }
+        if (rm.rot.some((v) => v) || t.rot.some((v) => v)) {
+          fail("door(to): connected rooms can't be rotated (align them axis-parallel)");
+          continue;
+        }
+        const key = [rm.name, t.name].sort().join("|");
+        if (seen.has(key)) {
+          if (seen.get(key) !== auto.width) {
+            fail(`door(to): ${rm.name} and ${t.name} declare this door with different widths`);
+          }
+          continue; // same fact stated twice
+        }
+        seen.set(key, auto.width);
+
+        // rooms may touch on any side, offset or not (a long room can run
+        // past its neighbor) — so try all four and take the wall that
+        // actually touches with room enough for the door
+        let hit = null;
+        let short = null; // touched, but the shared stretch is too small
+        let nearest = Infinity; // for the error message
+        for (const side of ["north", "south", "east", "west"]) {
+          const axis = side === "east" || side === "west" ? 0 : 2;
+          const cross = axis === 0 ? 2 : 0;
+          const sign = side === "east" || side === "south" ? 1 : -1;
+          const ownFace = rm.pos[axis] + sign * (rm.room.size[axis] / 2 + rm.room.thick);
+          const tgtFace = t.pos[axis] - sign * (t.room.size[axis] / 2 + t.room.thick);
+          const gap = sign * (tgtFace - ownFace);
+          if (Math.abs(gap) > 1e-6) {
+            if (gap > 0) nearest = Math.min(nearest, gap);
+            continue;
+          }
+          const lo = Math.max(rm.pos[cross] - rm.room.size[cross] / 2, t.pos[cross] - t.room.size[cross] / 2);
+          const hi = Math.min(rm.pos[cross] + rm.room.size[cross] / 2, t.pos[cross] + t.room.size[cross] / 2);
+          if (hi - lo < auto.width - 1e-9) {
+            short = hi - lo;
+            continue;
+          }
+          hit = { side, axis, cross, ownFace, lo, hi };
+          break;
+        }
+        if (!hit) {
+          if (short !== null) {
+            fail(
+              `door(to): the shared wall between ${rm.name} and ${t.name} is only ${Math.max(0, short).toFixed(2)} long — too short for a width-${auto.width} door`,
+            );
+          } else {
+            fail(
+              `door(to): ${rm.name} and ${t.name} don't share a wall${nearest < Infinity ? ` — their nearest faces are ${nearest.toFixed(2)} apart` : ""}. Place rooms against each other with a relation, e.g. behind(${rm.name}) — room-to-room relations sit wall-to-wall`,
+            );
+          }
+          continue;
+        }
+
+        const center = (hit.lo + hit.hi) / 2;
+        pending.get(rm.name)[hit.side].push({ width: auto.width, offset: center - rm.pos[hit.cross] });
+        const tp = pending.get(t.name);
+        if (tp) tp[OPP[hit.side]].push({ width: auto.width, offset: center - t.pos[hit.cross] });
+        connections.push({ rm, other: t.name, axis: hit.axis, plane: hit.ownFace, center });
+      }
+    }
+
+    // Every doorway becomes a named PLACE: an invisible, zero-size marker
+    // at the opening's center on the ground — walk to(study-south-door),
+    // ? distance(frida command_center-barracks-door). Never a blocker.
+    function marker(name, rm, pos) {
+      if (objects.has(name)) {
+        errors.push({
+          line: rm.line,
+          msg: `the doorway marker "${name}" collides with an existing name (line ${objects.get(name).line})`,
+        });
+        return;
+      }
+      objects.set(name, {
+        name, shape: "marker", line: rm.line,
+        size: null, r: null, h: null, sides: null,
+        at: pos.slice(), rel: null, rot: [0, 0, 0], color: null,
+        appear: rm.appear, vanish: rm.vanish, parent: rm.parent,
+        pos: pos.slice(), dims: { w: 0, h: 0, d: 0 }, bboxOff: [0, 0, 0],
+      });
+    }
+    for (const c of connections) {
+      const pos = c.axis === 0 ? [c.plane, 0, c.center] : [c.center, 0, c.plane];
+      marker(`${c.rm.name}-${c.other}-door`, c.rm, pos);
+    }
+    for (const rm of rooms) {
+      for (const wl of roomWalls(rm.room.size, rm.room.thick)) {
+        rm.room.doors[wl.side].forEach((d, i) => {
+          const axis = wl.along === "x" ? 0 : 2;
+          const plane = rm.pos[axis === 0 ? 2 : 0] + (axis === 0 ? wl.z : wl.x);
+          const center = rm.pos[axis] + d.offset;
+          const pos = axis === 0 ? [center, 0, plane] : [plane, 0, center];
+          marker(`${rm.name}-${wl.side}-door${i ? "-" + (i + 1) : ""}`, rm, pos);
+        });
+      }
+    }
+
+    // carve: replace whole walls with segment boxes (resolved in place)
+    for (const rm of rooms) {
+      const err = (msg) => errors.push({ line: rm.line, msg });
+      for (const wl of roomWalls(rm.room.size, rm.room.thick)) {
+        const ds = pending.get(rm.name)[wl.side];
+        if (!ds.length) continue;
+        const segs = wallSegments(wl.span, ds, wl.side, err);
+        if (!segs) continue;
+        const wall = objects.get(`${rm.name}-${wl.side}`);
+        if (!wall) continue; // name collision already reported at parse
+        objects.delete(wall.name);
+        for (const m of wallBoxes(rm.name, wl, segs, rm.room.size[1], rm.room.thick, wall.color, rm.line, rm)) {
+          // resolution already ran: finish these members by hand
+          m.pos = m.at.slice();
+          m.dims = { w: m.size[0], h: m.size[1], d: m.size[2] };
+          m.bboxOff = [0, 0, 0];
+          m.family = wall.family || null;
+          objects.set(m.name, m);
+        }
+      }
+    }
+    return new Set(connections.map((c) => [c.rm.name, c.other].sort().join("|")));
+  }
+
+  function applyProp(obj, { key, args }, err, timeCtx) {
+    const bad = (msg) => { err(`${key}(): ${msg}`); return false; };
+
+    if (obj.shape === "group" && ["size", "r", "h", "sides", "color"].includes(key)) {
+      return bad("groups don't have " + key + "() — put it on the members");
+    }
+    if (
+      obj.shape === "link" &&
+      (["at", "rotate", "in", "size", "h", "repeat", "spread", "jitter", "stagger"].includes(key) ||
+        RELATIONS.has(key))
+    ) {
+      return bad("links derive their pose — they take between(a b), r(), sides(), color(), appear(), vanish()");
+    }
+
+    switch (key) {
+      case "in": {
+        if (args.length !== 1 || num(args[0]) !== null) {
+          return bad("expected one group name");
+        }
+        obj.parent = args[0];
+        return true;
+      }
+      case "size": {
+        if (obj.shape !== "box") return bad("only boxes have size(w h d)");
+        const v = nums(args, 3);
+        return v ? ((obj.size = v), true) : bad("expected 3 numbers: size(w h d)");
+      }
+      case "r": {
+        if (obj.shape === "box") return bad("boxes use size(w h d), not r()");
+        const v = nums(args, 1);
+        if (!v || v[0] <= 0) return bad("expected one positive number");
+        obj.r = v[0];
+        return true;
+      }
+      case "h": {
+        if (obj.shape !== "cylinder") return bad("only cylinders have h()");
+        const v = nums(args, 1);
+        if (!v || v[0] <= 0) return bad("expected one positive number");
+        obj.h = v[0];
+        return true;
+      }
+      case "between": {
+        if (obj.shape !== "link") return bad("only links have between(a b)");
+        if (args.length !== 2 || args.some((a2) => num(a2) !== null)) {
+          return bad("expected two object names: between(a b)");
+        }
+        obj.between = args.slice();
+        return true;
+      }
+      case "sides": {
+        if (obj.shape !== "cylinder" && obj.shape !== "link") return bad("only cylinders and links have sides()");
+        const v = nums(args, 1);
+        if (!v || !Number.isInteger(v[0]) || v[0] < 3 || v[0] > 64) {
+          return bad("expected a whole number from 3 to 64");
+        }
+        obj.sides = v[0];
+        return true;
+      }
+      case "at": {
+        // at(x y z), or at(name dx? dz?) — standing at a named thing's
+        // spot (its x/z; you rest on the ground at your own height)
+        if (args.length >= 1 && num(args[0]) === null) {
+          const off = args.length > 1 ? nums(args.slice(1), 2) : [0, 0];
+          if (args.length !== 1 && !off) {
+            return bad("expected at(name) or at(name dx dz)");
+          }
+          obj.at = { ref: args[0], dx: off[0], dz: off[1] };
+          return true;
+        }
+        const v = nums(args, 3);
+        return v ? ((obj.at = v), true) : bad("expected at(x y z), or at(name dx? dz?)");
+      }
+      case "rotate": {
+        const v = nums(args, 3);
+        return v ? ((obj.rot = v), true) : bad("expected 3 numbers (degrees): rotate(x y z)");
+      }
+      case "color": {
+        if (args.length !== 1) return bad("expected one color name or #hex");
+        obj.color = args[0];
+        return true;
+      }
+      case "appear": case "vanish": {
+        if (args.length === 1) {
+          const w = wallTime(args[0], timeCtx, bad);
+          if (Number.isNaN(w)) return false;
+          if (w !== null) {
+            obj[key] = w;
+            return true;
+          }
+        }
+        const v = nums(args, 1);
+        if (!v || v[0] < 0) return bad("expected one number >= 0 (seconds, or 5:15 with a clock)");
+        obj[key] = v[0];
+        return true;
+      }
+      case "repeat": {
+        const v = nums(args, 1);
+        if (!v || !Number.isInteger(v[0]) || v[0] < 2 || v[0] > 200) {
+          return bad("expected a whole number of copies, 2 to 200");
+        }
+        obj.repeat = v[0];
+        return true;
+      }
+      case "spread": {
+        const v = nums(args, 3);
+        return v ? ((obj.spread = v), true) : bad("expected 3 numbers: the per-copy offset");
+      }
+      case "jitter": {
+        const v = nums(args, 3) || nums(args, 4);
+        if (!v || v.slice(0, 3).some((n) => n < 0)) {
+          return bad("expected jitter(x y z) or jitter(x y z seed), amounts >= 0");
+        }
+        obj.jitter = v.slice(0, 3);
+        if (v.length === 4) obj.seed = v[3];
+        return true;
+      }
+      case "stagger": {
+        const v = nums(args, 1);
+        if (!v || v[0] < 0) return bad("expected one number >= 0 (seconds between copies)");
+        obj.stagger = v[0];
+        return true;
+      }
+      default: {
+        if (RELATIONS.has(key)) {
+          if (obj.rel) return bad(`"${obj.name}" already has a placement relation`);
+          if (args.length < 1 || args.length > 3) {
+            return bad("expected: " + key + "(target gap?) or " + key + "(a b gap?) — two targets anchor to their combined bounds");
+          }
+          // second argument: a gap if numeric, a second target if a name
+          let gap = null;
+          let target2 = null;
+          if (args.length >= 2) {
+            if (num(args[1]) === null) target2 = args[1];
+            else gap = num(args[1]);
+          }
+          if (args.length === 3) {
+            if (!target2) return bad("expected: " + key + "(a b gap)");
+            gap = num(args[2]);
+            if (gap === null) return bad("gap must be a number");
+          }
+          obj.rel = { kind: key, target: args[0], target2, gap };
+          return true;
+        }
+        return bad(`unknown property`);
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------- repeat
+  //
+  // repeat(n) stamps an object (or a whole group) into n copies named
+  // name-1 … name-n, then removes the original. Copies vary declaratively:
+  // spread = per-copy offset, jitter = seeded random offset (reproducible —
+  // same scene, same layout, on any host), stagger = each copy's animation
+  // clock runs s seconds behind the previous. Animations written against
+  // the original name apply to every copy; relations and queries naming it
+  // from outside are ambiguous and error. Expansion happens before
+  // resolution, innermost repeats first, so nothing downstream changes.
+
+  // The PRNG is part of the language spec (mulberry32): ports must match it.
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function expandRepeats(objects, anims, queries, errors) {
+    // every object whose ancestor chain passes through `name`
+    function descendantsOf(name) {
+      const out = [];
+      for (const o of objects.values()) {
+        const seen = new Set();
+      let cur = o;
+        while (cur && cur.parent && !seen.has(cur.parent)) {
+          if (cur.parent === name) {
+            out.push(o);
+            break;
+          }
+          seen.add(cur.parent);
+          cur = objects.get(cur.parent);
+        }
+      }
+      return out;
+    }
+
+    function expandOne(obj) {
+      const family = [obj, ...descendantsOf(obj.name)];
+      const familyNames = new Set(family.map((f) => f.name));
+      const doored = (f) =>
+        f.room && (f.room.autos.length || Object.values(f.room.doors).some((d) => d.length));
+      if (family.some(doored)) {
+        // door carving runs post-resolution and clone wall names drift
+        // (cc-north-1 vs cc-1-north); keep this combination off until designed
+        errors.push({
+          line: obj.line,
+          msg: "repeat: rooms with doors can't repeat yet — lay them out individually",
+        });
+        obj.repeat = null;
+        return;
+      }
+      const n = obj.repeat;
+      const spread = obj.spread || [0, 0, 0];
+      const jit = obj.jitter || [0, 0, 0];
+      const stag = obj.stagger || 0;
+      const rng = mulberry32(obj.seed === null ? 1 : obj.seed);
+
+      // check every generated name before touching anything
+      for (let i = 1; i <= n; i++) {
+        for (const f of family) {
+          const nm = f.name + "-" + i;
+          if (objects.has(nm) && !familyNames.has(nm)) {
+            errors.push({
+              line: obj.line,
+              msg: `repeat: wants to create "${nm}", but that name is taken (line ${objects.get(nm).line})`,
+            });
+            obj.repeat = null;
+            return;
+          }
+        }
+      }
+
+      for (const f of family) objects.delete(f.name);
+
+      for (let i = 1; i <= n; i++) {
+        const shift = (i - 1) * stag;
+        const off = [
+          (i - 1) * spread[0] + (rng() * 2 - 1) * jit[0],
+          (i - 1) * spread[1] + (rng() * 2 - 1) * jit[1],
+          (i - 1) * spread[2] + (rng() * 2 - 1) * jit[2],
+        ];
+        const mapping = new Map(family.map((f) => [f.name, f.name + "-" + i]));
+        for (const f of family) {
+          const base = f.offset || [0, 0, 0];
+          objects.set(mapping.get(f.name), {
+            ...f,
+            name: mapping.get(f.name),
+            repeat: null, spread: null, jitter: null, stagger: null,
+            parent: f.parent ? mapping.get(f.parent) || f.parent : null,
+            rel: f.rel
+              ? {
+                  ...f.rel,
+                  target: mapping.get(f.rel.target) || f.rel.target,
+                  target2: f.rel.target2 ? mapping.get(f.rel.target2) || f.rel.target2 : null,
+                }
+              : null,
+            // spread/jitter move the copy itself; members just ride along
+            offset: f === obj ? [base[0] + off[0], base[1] + off[1], base[2] + off[2]] : base.slice(),
+            // stagger delays the copy's animation clock, not its existence
+            clockShift: (f.clockShift || 0) + shift,
+            family: f.family || f.name, // rendering hint: copies share a palette slot
+          });
+        }
+      }
+
+      // animations against a family name fan out to every copy, staggered
+      const fanned = [];
+      for (const a of anims) {
+        if (!familyNames.has(a.target)) {
+          const ref = (a.to && a.to.ref) || (a.around && a.around.ref);
+          if (ref && familyNames.has(ref)) {
+            errors.push({
+              line: a.line,
+              msg: `"${ref}" is repeated into ${n} copies — name one, e.g. ${ref}-1`,
+            });
+            continue;
+          }
+          fanned.push(a);
+          continue;
+        }
+        for (let i = 1; i <= n; i++) {
+          const c = { ...a, target: a.target + "-" + i, startShift: (a.startShift || 0) + (i - 1) * stag };
+          if (a.to && a.to.ref && familyNames.has(a.to.ref)) c.to = { ...a.to, ref: a.to.ref + "-" + i };
+          if (a.around && a.around.ref && familyNames.has(a.around.ref)) {
+            c.around = { ref: a.around.ref + "-" + i };
+          }
+          fanned.push(c);
+        }
+      }
+      anims.length = 0;
+      anims.push(...fanned);
+
+      // naming the family from outside is ambiguous — say so clearly
+      for (const o of objects.values()) {
+        if (o.rel && (familyNames.has(o.rel.target) || familyNames.has(o.rel.target2))) {
+          const hit = familyNames.has(o.rel.target) ? o.rel.target : o.rel.target2;
+          errors.push({
+            line: o.line,
+            msg: `${o.rel.kind}(): "${hit}" is repeated into ${n} copies — place against one, e.g. ${hit}-1`,
+          });
+          o.rel = null;
+        }
+        if (o.between) {
+          const hit = o.between.find((en) => familyNames.has(en));
+          if (hit) {
+            errors.push({
+              line: o.line,
+              msg: `between(): "${hit}" is repeated into ${n} copies — link one, e.g. ${hit}-1`,
+            });
+          }
+        }
+      }
+      // (queries may keep naming the family: it becomes a SET of the copies)
+    }
+
+    // innermost first: a repeated member inside a repeated group expands
+    // before the group stamps out the whole (already-expanded) assembly
+    let guard = 0;
+    while (guard++ < 300) {
+      const next = [...objects.values()].find(
+        (o) => o.repeat && !descendantsOf(o.name).some((d) => d.repeat),
+      );
+      if (!next) break;
+      expandOne(next);
+    }
+  }
+
+  // ------------------------------------------------------------------ links
+  //
+  // A link is a DERIVED object — the first of its kind: a rigid straight
+  // cylinder spanning two named things, its pose recomputed from their
+  // live world positions at every sampled instant. It is a maintained
+  // relation, not a motion — which is why it tracks even though to(name)
+  // deliberately doesn't ("no pursuit" is about animation segments).
+  // Links may cross frames (they derive from world poses). Hard line:
+  // straight and rigid only — no springs, chains, or joints.
+
+  function validateLinks(objects, errors) {
+    for (const o of objects.values()) {
+      if (o.shape !== "link") continue;
+      for (const en of o.between) {
+        const t = objects.get(en);
+        if (!t) {
+          errors.push({ line: o.line, msg: `between(): no object named "${en}"` });
+        } else if (t.shape === "link") {
+          errors.push({ line: o.line, msg: `between(): "${en}" is a link — links can't chain (yet)` });
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- resolution
+
+  // Axis-aligned dimensions. Rotation is ignored for bounds in v0.
+  function dimsOf(o) {
+    switch (o.shape) {
+      case "box": return { w: o.size[0], h: o.size[1], d: o.size[2] };
+      case "sphere": return { w: 2 * o.r, h: 2 * o.r, d: 2 * o.r };
+      case "cylinder": return { w: 2 * o.r, h: o.h, d: 2 * o.r };
+    }
+  }
+
+  // Positions are resolved in the object's own frame: group members in
+  // group-local space, everything else in world space. A group's bounds are
+  // the union of its members' local bounds; since that union need not be
+  // centered on the group origin, every object carries bboxOff — the offset
+  // from its position to its bounding-box center ([0,0,0] for shapes).
+  function resolveAll(objects, errors) {
+    // membership: validate in() targets and index children
+    const children = new Map(); // group name -> [member objects]
+    for (const o of objects.values()) {
+      if (!o.parent) continue;
+      const p = objects.get(o.parent);
+      if (!p) {
+        errors.push({ line: o.line, msg: `in(): no group named "${o.parent}"` });
+        o.parent = null;
+        continue;
+      }
+      if (p.shape !== "group") {
+        errors.push({ line: o.line, msg: `in(): "${o.parent}" is not a group` });
+        o.parent = null;
+        continue;
+      }
+      if (!children.has(o.parent)) children.set(o.parent, []);
+      children.get(o.parent).push(o);
+    }
+
+    // membership cycles (a in b, b in a): break them before resolving
+    for (const o of objects.values()) {
+      const seen = new Set([o.name]);
+      let cur = o;
+      while (cur.parent) {
+        const p = objects.get(cur.parent);
+        if (seen.has(p.name)) {
+          errors.push({ line: p.line, msg: `circular in() membership involving "${p.name}"` });
+          const sibs = children.get(p.parent);
+          if (sibs) sibs.splice(sibs.indexOf(p), 1);
+          p.parent = null;
+          break;
+        }
+        seen.add(p.name);
+        cur = p;
+      }
+    }
+
+    const status = new Map(); // name -> "resolving" | "done"
+
+    function boundsOf(o) {
+      if (o.shape !== "group") return { dims: dimsOf(o), off: [0, 0, 0] };
+      const min = [Infinity, Infinity, Infinity];
+      const max = [-Infinity, -Infinity, -Infinity];
+      let any = false;
+      for (const c of children.get(o.name) || []) {
+        resolve(c);
+        any = true;
+        const half = [c.dims.w / 2, c.dims.h / 2, c.dims.d / 2];
+        for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], c.pos[i] + c.bboxOff[i] - half[i]);
+          max[i] = Math.max(max[i], c.pos[i] + c.bboxOff[i] + half[i]);
+        }
+      }
+      if (!any) return { dims: { w: 0, h: 0, d: 0 }, off: [0, 0, 0] };
+      return {
+        dims: { w: max[0] - min[0], h: max[1] - min[1], d: max[2] - min[2] },
+        off: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2],
+      };
+    }
+
+    function resolve(o) {
+      if (status.get(o.name) === "done") return;
+      if (status.get(o.name) === "resolving") {
+        errors.push({ line: o.line, msg: `circular placement involving "${o.name}"` });
+        o.dims = o.shape === "group" ? { w: 0, h: 0, d: 0 } : dimsOf(o);
+        o.bboxOff = [0, 0, 0];
+        o.pos = [0, o.dims.h / 2, 0];
+        status.set(o.name, "done");
+        return;
+      }
+      status.set(o.name, "resolving");
+
+      if (o.shape === "link") {
+        // a link's real pose is derived at sample time from its endpoints;
+        // these placeholders exist so generic code paths have something
+        o.dims = { w: 0, h: 0, d: 0 };
+        o.bboxOff = [0, 0, 0];
+        o.pos = [0, 0, 0];
+        status.set(o.name, "done");
+        return;
+      }
+
+      const b = boundsOf(o);
+      const d = b.dims;
+      const off = b.off;
+      // default: shapes rest on the ground; a group is a frame at the origin
+      let pos = o.shape === "group" ? [0, 0, 0] : [0, d.h / 2, 0];
+
+      if (o.at && o.at.ref) {
+        const t = objects.get(o.at.ref);
+        if (!t) {
+          errors.push({ line: o.line, msg: `at(): no object named "${o.at.ref}"` });
+        } else if (t.shape === "link") {
+          errors.push({ line: o.line, msg: `at(): "${t.name}" is a link — links have no placed position` });
+        } else if ((t.parent || null) !== (o.parent || null)) {
+          errors.push({
+            line: o.line,
+            msg: `at(): "${t.name}" is in a different group — positions must stay within one frame`,
+          });
+        } else {
+          resolve(t);
+          // the named thing's x/z; the default ground-rest y is kept
+          pos = [t.pos[0] + o.at.dx, pos[1], t.pos[2] + o.at.dz];
+        }
+      } else if (o.at) {
+        pos = o.at.slice();
+      } else if (o.rel) {
+        const anchor = (name) => {
+          const t = objects.get(name);
+          if (!t) {
+            errors.push({ line: o.line, msg: `${o.rel.kind}(): no object named "${name}"` });
+            return null;
+          }
+          if (t.shape === "link") {
+            errors.push({
+              line: o.line,
+              msg: `${o.rel.kind}(): "${t.name}" is a link — links have no placed position to build on`,
+            });
+            return null;
+          }
+          if ((t.parent || null) !== (o.parent || null)) {
+            errors.push({
+              line: o.line,
+              msg: `${o.rel.kind}(): "${t.name}" is in a different group — relations must stay within one frame`,
+            });
+            return null;
+          }
+          resolve(t);
+          return t;
+        };
+        const t = anchor(o.rel.target);
+        const t2 = t && o.rel.target2 ? anchor(o.rel.target2) : null;
+        if (t && (!o.rel.target2 || t2)) {
+          // anchor box: one target's bounds, or the union of two —
+          // "left-of(command lab)" runs along both
+          let td = t.dims;
+          let tc = [t.pos[0] + t.bboxOff[0], t.pos[1] + t.bboxOff[1], t.pos[2] + t.bboxOff[2]];
+          if (t2) {
+            const c2 = [t2.pos[0] + t2.bboxOff[0], t2.pos[1] + t2.bboxOff[1], t2.pos[2] + t2.bboxOff[2]];
+            const halves = [td.w / 2, td.h / 2, td.d / 2];
+            const halves2 = [t2.dims.w / 2, t2.dims.h / 2, t2.dims.d / 2];
+            const min = tc.map((v, i) => Math.min(v - halves[i], c2[i] - halves2[i]));
+            const max = tc.map((v, i) => Math.max(v + halves[i], c2[i] + halves2[i]));
+            td = { w: max[0] - min[0], h: max[1] - min[1], d: max[2] - min[2] };
+            tc = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+          }
+          // between rooms, "beside" means adjacent: the gap defaults to 0
+          // (wall-to-wall), which is what door(to) needs
+          const gap = o.rel.gap !== null
+            ? o.rel.gap
+            : o.room && t.room && (!t2 || t2.room) ? 0 : DEFAULT_GAP[o.rel.kind];
+          let c;
+          switch (o.rel.kind) {
+            case "on":     c = [tc[0], tc[1] + td.h / 2 + d.h / 2, tc[2]]; break;
+            case "above":  c = [tc[0], tc[1] + td.h / 2 + gap + d.h / 2, tc[2]]; break;
+            case "below":  c = [tc[0], tc[1] - td.h / 2 - gap - d.h / 2, tc[2]]; break;
+            // Horizontal relations set x/z; the object rests on the ground.
+            case "left-of":     c = [tc[0] - td.w / 2 - gap - d.w / 2, d.h / 2, tc[2]]; break;
+            case "right-of":    c = [tc[0] + td.w / 2 + gap + d.w / 2, d.h / 2, tc[2]]; break;
+            case "in-front-of": c = [tc[0], d.h / 2, tc[2] + td.d / 2 + gap + d.d / 2]; break;
+            case "behind":      c = [tc[0], d.h / 2, tc[2] - td.d / 2 - gap - d.d / 2]; break;
+          }
+          pos = [c[0] - off[0], c[1] - off[1], c[2] - off[2]];
+        }
+      }
+
+      // repeat's spread/jitter land here, after placement, so they compose
+      // with at() and relations alike
+      if (o.offset) {
+        pos = [pos[0] + o.offset[0], pos[1] + o.offset[1], pos[2] + o.offset[2]];
+      }
+
+      o.dims = d;
+      o.bboxOff = off;
+      o.pos = pos;
+      status.set(o.name, "done");
+    }
+
+    for (const o of objects.values()) resolve(o);
+    return children;
+  }
+
+  // -------------------------------------------------------------- animation
+  //
+  // Each object gets up to two channels: "move" (position) and "turn"
+  // (rotation). Within a channel, segments chain: a segment starts when the
+  // previous one ends (unless start() is explicit) and starts from wherever
+  // the previous one left off (unless from() is explicit).
+
+  function buildTracks(objects, anims, errors) {
+    const cursors = new Map(); // "target\0kind" -> { end, lastTo }
+    let duration = 0;
+
+    for (const a of anims) {
+      const obj = objects.get(a.target);
+      if (!obj) {
+        errors.push({ line: a.line, msg: `${a.kind}: no object named "${a.target}"` });
+        continue;
+      }
+      if (obj.shape === "link" && a.kind !== "paint") {
+        errors.push({
+          line: a.line,
+          msg: `${a.kind}: "${a.target}" is a link — its pose is derived from its endpoints`,
+        });
+        continue;
+      }
+      if (a.kind === "paint" && (obj.shape === "group" || obj.shape === "marker")) {
+        errors.push({
+          line: a.line,
+          msg: obj.shape === "group"
+            ? `paint: "${a.target}" is a group — groups have no surface; paint a member`
+            : `paint: "${a.target}" is a doorway marker — markers are invisible`,
+        });
+        continue;
+      }
+      // orbit is position animation: it shares the move channel and chains
+      // with move segments (fly to the ring, then circle it).
+      const channel = a.kind === "turn" ? "turn" : a.kind === "paint" ? "paint" : "move";
+      const key = a.target + "/" + channel;
+      // An object's clock starts when it exists: the first segment chains
+      // from appear(), not from t=0. Explicit start() still overrides.
+      // a repeated copy's clock runs stagger-shifted: chaining starts late,
+      // and explicit start() times shift with it
+      const cur = cursors.get(key) || { end: obj.appear + (obj.clockShift || 0), lastTo: null };
+      const t0 = a.start !== null ? a.start + (a.startShift || 0) : cur.end + (a.after || 0);
+      const t1 = t0 + a.over;
+
+      if (a.kind === "paint") {
+        // the color channel chains like the spatial ones; from may be null —
+        // an unset birth color is the renderer's palette pick, which the
+        // core never knows (renderers resolve null to the mesh's own color)
+        const from = cur.lastTo !== null ? cur.lastTo : obj.color;
+        if (!obj.track) obj.track = { move: [], turn: [], paint: [] };
+        obj.track.paint.push({ t0, t1, from, to: a.to, ease: a.ease });
+        cursors.set(key, { end: t1, lastTo: a.to });
+        if (t1 > duration) duration = t1;
+        continue;
+      }
+      const base = channel === "move" ? obj.pos : obj.rot;
+      const prev = cur.lastTo || base.slice();
+      // walk's from() is x z; its height comes from wherever the walker is
+      const from = a.from ? (a.kind === "walk" ? [a.from[0], prev[1], a.from[1]] : a.from) : prev;
+
+      let to;
+      let orbit = null;
+      if (a.kind === "orbit") {
+        let center;
+        if (a.around.ref) {
+          // around(name): the named object's placed (t=0) position,
+          // same rules as to(name) — same frame, no pursuit
+          const c = objects.get(a.around.ref);
+          if (!c) {
+            errors.push({ line: a.line, msg: `around(): no object named "${a.around.ref}"` });
+            continue;
+          }
+          if ((c.parent || null) !== (obj.parent || null)) {
+            errors.push({
+              line: a.line,
+              msg: `around(): "${c.name}" is in a different group — centers must stay within one frame`,
+            });
+            continue;
+          }
+          center = c.pos.slice();
+        } else {
+          center = a.around;
+        }
+        // The radius is wherever the segment starts, projected onto the
+        // circle's plane; starting on the axis leaves nothing to travel.
+        const rel = [from[0] - center[0], from[1] - center[1], from[2] - center[2]];
+        const planar =
+          a.axis === "x" ? Math.hypot(rel[1], rel[2]) :
+          a.axis === "y" ? Math.hypot(rel[0], rel[2]) :
+          Math.hypot(rel[0], rel[1]);
+        if (planar < 1e-9) {
+          errors.push({
+            line: a.line,
+            msg: `orbit: "${a.target}" starts on the ${a.axis} axis through the center — no circle to travel`,
+          });
+          continue;
+        }
+        orbit = { center, axis: a.axis, deg: a.by[0] };
+        to = orbitPos(orbit, from, 1);
+      } else if (a.kind === "walk") {
+        // ground-plane movement: x/z from the destination, height stays put
+        if (a.by) {
+          to = [from[0] + a.by[0], from[1], from[2] + a.by[1]];
+        } else if (a.to.ref) {
+          const dest = objects.get(a.to.ref);
+          if (!dest) {
+            errors.push({ line: a.line, msg: `to(): no object named "${a.to.ref}"` });
+            continue;
+          }
+          if (dest.shape === "link") {
+            errors.push({ line: a.line, msg: `to(): "${dest.name}" is a link — links have no placed position` });
+            continue;
+          }
+          if ((dest.parent || null) !== (obj.parent || null)) {
+            errors.push({
+              line: a.line,
+              msg: `to(): "${dest.name}" is in a different group — destinations must stay within one frame`,
+            });
+            continue;
+          }
+          const off = a.to.off || [0, 0];
+          to = [dest.pos[0] + off[0], from[1], dest.pos[2] + off[1]];
+        } else {
+          to = [a.to[0], from[1], a.to[1]];
+        }
+      } else if (a.by) {
+        // relative: displacement from wherever this segment starts
+        to = [from[0] + a.by[0], from[1] + a.by[1], from[2] + a.by[2]];
+      } else if (a.to.ref) {
+        // to(name): the named object's placed (t=0) position — not its
+        // animated position; there is no pursuit
+        const dest = objects.get(a.to.ref);
+        if (!dest) {
+          errors.push({ line: a.line, msg: `to(): no object named "${a.to.ref}"` });
+          continue;
+        }
+        if (dest.shape === "link") {
+          errors.push({ line: a.line, msg: `to(): "${dest.name}" is a link — links have no placed position` });
+          continue;
+        }
+        if ((dest.parent || null) !== (obj.parent || null)) {
+          errors.push({
+            line: a.line,
+            msg: `to(): "${dest.name}" is in a different group — destinations must stay within one frame`,
+          });
+          continue;
+        }
+        const off = a.to.off || [0, 0, 0];
+        to = [dest.pos[0] + off[0], dest.pos[1] + off[1], dest.pos[2] + off[2]];
+      } else {
+        to = a.to;
+      }
+
+      if (!obj.track) obj.track = { move: [], turn: [], paint: [] };
+      obj.track[channel].push({ t0, t1, from, to, ease: a.ease, orbit });
+      cursors.set(key, { end: t1, lastTo: to });
+      if (t1 > duration) duration = t1;
+    }
+
+    for (const o of objects.values()) {
+      if (o.track) {
+        o.track.move.sort((x, y) => x.t0 - y.t0);
+        o.track.turn.sort((x, y) => x.t0 - y.t0);
+        o.track.paint.sort((x, y) => x.t0 - y.t0);
+      }
+      // lifetime events are part of the timeline too
+      if (o.appear > duration) duration = o.appear;
+      if (o.vanish !== null && o.vanish > duration) duration = o.vanish;
+    }
+    return duration;
+  }
+
+  // Value of one channel at time t: base before the first segment,
+  // interpolating inside a segment, holding the last reached value between
+  // and after segments.
+  function sampleChannel(segs, base, t) {
+    let value = base;
+    for (const s of segs) {
+      if (t >= s.t1) { value = s.to; continue; }
+      if (t >= s.t0) {
+        const k = EASES[s.ease]((t - s.t0) / (s.t1 - s.t0));
+        value = s.orbit
+          ? orbitPos(s.orbit, s.from, k)
+          : [
+              s.from[0] + (s.to[0] - s.from[0]) * k,
+              s.from[1] + (s.to[1] - s.from[1]) * k,
+              s.from[2] + (s.to[2] - s.from[2]) * k,
+            ];
+      }
+      break;
+    }
+    return value;
+  }
+
+  // The color channel at time t: the settled color (string, or null for
+  // "birth color" — the renderer's palette pick), plus a mix while a fade
+  // is in flight. Color math stays out of the core: a mix hands the
+  // renderer {from, to, k} and lerping is its problem.
+  function samplePaint(segs, base, t) {
+    let value = base;
+    let mix = null;
+    for (const s of segs) {
+      if (t >= s.t1) { value = s.to; continue; }
+      if (t >= s.t0 && s.t1 > s.t0) {
+        mix = { from: s.from, to: s.to, k: EASES[s.ease]((t - s.t0) / (s.t1 - s.t0)) };
+      }
+      break;
+    }
+    return { value, mix };
+  }
+
+  // Position along an orbit at fraction k of the sweep: rotate the start
+  // point around the axis through the center. Built on eulerToMat so a
+  // positive arc turns exactly the way turn() does around the same axis.
+  function orbitPos(orbit, from, k) {
+    const angle = orbit.deg * k;
+    const e =
+      orbit.axis === "x" ? [angle, 0, 0] :
+      orbit.axis === "y" ? [0, angle, 0] :
+      [0, 0, angle];
+    const rel = [from[0] - orbit.center[0], from[1] - orbit.center[1], from[2] - orbit.center[2]];
+    const v = matVec(eulerToMat(e), rel);
+    return [orbit.center[0] + v[0], orbit.center[1] + v[1], orbit.center[2] + v[2]];
+  }
+
+  // ------------------------------------------------------- rotation math
+  // Row-major 3x3 matrices; Euler order XYZ in degrees (R = Rx·Ry·Rz),
+  // matching the three.js default so renderers can use rot directly.
+
+  const DEG = Math.PI / 180;
+
+  function eulerToMat(e) {
+    const cx = Math.cos(e[0] * DEG), sx = Math.sin(e[0] * DEG);
+    const cy = Math.cos(e[1] * DEG), sy = Math.sin(e[1] * DEG);
+    const cz = Math.cos(e[2] * DEG), sz = Math.sin(e[2] * DEG);
+    return [
+      cy * cz, -cy * sz, sy,
+      cx * sz + sx * sy * cz, cx * cz - sx * sy * sz, -sx * cy,
+      sx * sz - cx * sy * cz, sx * cz + cx * sy * sz, cx * cy,
+    ];
+  }
+
+  function matMul(a, b) {
+    const m = new Array(9);
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) {
+        m[r * 3 + c] =
+          a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+      }
+    }
+    return m;
+  }
+
+  function matVec(m, v) {
+    return [
+      m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+      m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+      m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+    ];
+  }
+
+  function matToEuler(m) {
+    const sy = Math.max(-1, Math.min(1, m[2]));
+    const y = Math.asin(sy);
+    let x, z;
+    if (Math.abs(sy) < 0.9999999) {
+      x = Math.atan2(-m[5], m[8]);
+      z = Math.atan2(-m[1], m[0]);
+    } else {
+      x = Math.atan2(m[7], m[4]); // gimbal lock: fold z into x
+      z = 0;
+    }
+    return [x / DEG, y / DEG, z / DEG];
+  }
+
+  // The whole scene at time t: posed objects in WORLD space (group members
+  // compose through their ancestors' transforms) plus query answers, which
+  // are time-dependent (a sight line can open and close as things move, and
+  // objects only exist inside their [appear, vanish) window).
+  function sample(compiled, t) {
+    const map = poseAt(compiled, t);
+    return { t, objects: [...map.values()], results: evalQueries(compiled.queries, map, compiled.sets) };
+  }
+
+  // Just the poses (name -> posed object), shared by sample() and the
+  // temporal-query sweep, which asks the same questions at many times.
+  function poseAt(compiled, t) {
+    const byName = new Map(compiled.objects.map((o) => [o.name, o]));
+
+    const locals = new Map();
+    for (const o of compiled.objects) {
+      locals.set(o.name, {
+        pos: o.track ? sampleChannel(o.track.move, o.pos, t) : o.pos,
+        rot: o.track ? sampleChannel(o.track.turn, o.rot, t) : o.rot,
+        present: t >= o.appear && (o.vanish === null || t < o.vanish),
+      });
+    }
+
+    const worlds = new Map();
+    function worldOf(name) {
+      if (worlds.has(name)) return worlds.get(name);
+      const o = byName.get(name);
+      const l = locals.get(name);
+      let w;
+      if (!o.parent) {
+        w = { pos: l.pos, rot: l.rot, mat: eulerToMat(l.rot), present: l.present };
+      } else {
+        const p = worldOf(o.parent);
+        const off = matVec(p.mat, l.pos);
+        const mat = matMul(p.mat, eulerToMat(l.rot));
+        w = {
+          pos: [p.pos[0] + off[0], p.pos[1] + off[1], p.pos[2] + off[2]],
+          rot: matToEuler(mat),
+          mat,
+          present: l.present && p.present, // absent group hides its members
+        };
+      }
+      worlds.set(name, w);
+      return w;
+    }
+
+    const out = new Map(
+      compiled.objects.map((o) => {
+        const w = worldOf(o.name);
+        const posed = { ...o, pos: w.pos, rot: w.rot, present: w.present };
+        if (o.track && o.track.paint.length) {
+          const p = samplePaint(o.track.paint, o.color, t);
+          posed.color = p.value;
+          if (p.mix) posed.colorMix = p.mix;
+        }
+        return [o.name, posed];
+      }),
+    );
+
+    // links derive last, from their endpoints' posed world positions
+    for (const o of compiled.objects) {
+      if (o.shape !== "link") continue;
+      const p = out.get(o.name);
+      const e0 = out.get(o.between[0]);
+      const e1 = out.get(o.between[1]);
+      if (!e0 || !e1) continue; // endpoint errors already reported
+      const d = [e1.pos[0] - e0.pos[0], e1.pos[1] - e0.pos[1], e1.pos[2] - e0.pos[2]];
+      const len = Math.hypot(d[0], d[1], d[2]);
+      let rot = [0, 0, 0];
+      if (len > 1e-9) {
+        const dir = [d[0] / len, d[1] / len, d[2] / len];
+        // orthonormal basis with +y along the link (cylinders point +y)
+        const up = Math.abs(dir[1]) < 0.99 ? [0, 1, 0] : [1, 0, 0];
+        let ax = [
+          up[1] * dir[2] - up[2] * dir[1],
+          up[2] * dir[0] - up[0] * dir[2],
+          up[0] * dir[1] - up[1] * dir[0],
+        ];
+        const al = Math.hypot(ax[0], ax[1], ax[2]);
+        ax = [ax[0] / al, ax[1] / al, ax[2] / al];
+        const az = [
+          ax[1] * dir[2] - ax[2] * dir[1],
+          ax[2] * dir[0] - ax[0] * dir[2],
+          ax[0] * dir[1] - ax[1] * dir[0],
+        ];
+        rot = matToEuler([
+          ax[0], dir[0], az[0],
+          ax[1], dir[1], az[1],
+          ax[2], dir[2], az[2],
+        ]);
+      }
+      out.set(o.name, {
+        ...p,
+        pos: [(e0.pos[0] + e1.pos[0]) / 2, (e0.pos[1] + e1.pos[1]) / 2, (e0.pos[2] + e1.pos[2]) / 2],
+        rot, len,
+        ep0: e0.pos.slice(), ep1: e1.pos.slice(),
+        present: p.present && e0.present !== false && e1.present !== false,
+      });
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- queries
+
+  // World bounds follow the posed rotation: the axis-aligned box around the
+  // rotated shape. Exact at 90° steps (a lying body blocks low, not tall),
+  // conservative in between (a 45° box blocks as its enclosing box).
+  // Spheres skip this — rotation cannot change their bounds, and the box
+  // formula would wrongly inflate them.
+  function aabb(o) {
+    // a posed link: the box around its live endpoints, fattened by r
+    if (o.shape === "link" && o.ep0) {
+      return {
+        min: [
+          Math.min(o.ep0[0], o.ep1[0]) - o.r,
+          Math.min(o.ep0[1], o.ep1[1]) - o.r,
+          Math.min(o.ep0[2], o.ep1[2]) - o.r,
+        ],
+        max: [
+          Math.max(o.ep0[0], o.ep1[0]) + o.r,
+          Math.max(o.ep0[1], o.ep1[1]) + o.r,
+          Math.max(o.ep0[2], o.ep1[2]) + o.r,
+        ],
+      };
+    }
+    let hw = o.dims.w / 2, hh = o.dims.h / 2, hd = o.dims.d / 2;
+    if (o.shape !== "sphere" && (o.rot[0] || o.rot[1] || o.rot[2])) {
+      const m = eulerToMat(o.rot);
+      const ex = Math.abs(m[0]) * hw + Math.abs(m[1]) * hh + Math.abs(m[2]) * hd;
+      const ey = Math.abs(m[3]) * hw + Math.abs(m[4]) * hh + Math.abs(m[5]) * hd;
+      const ez = Math.abs(m[6]) * hw + Math.abs(m[7]) * hh + Math.abs(m[8]) * hd;
+      hw = ex; hh = ey; hd = ez;
+    }
+    return {
+      min: [o.pos[0] - hw, o.pos[1] - hh, o.pos[2] - hd],
+      max: [o.pos[0] + hw, o.pos[1] + hh, o.pos[2] + hd],
+    };
+  }
+
+  // Strict overlap: objects merely touching (resting on) do not overlap.
+  function boxesOverlap(A, B) {
+    for (let i = 0; i < 3; i++) {
+      if (!(A.min[i] < B.max[i] && A.max[i] > B.min[i])) return false;
+    }
+    return true;
+  }
+
+  // Where segment p0→p1 enters an AABB, as t in [0,1), or null if it misses.
+  // Strict, matching overlaps(): grazing a face or edge does not count.
+  function segmentEntersAABB(p0, p1, box) {
+    let tEnter = 0;
+    let tExit = 1;
+    for (let i = 0; i < 3; i++) {
+      const d = p1[i] - p0[i];
+      if (Math.abs(d) < 1e-12) {
+        if (p0[i] <= box.min[i] || p0[i] >= box.max[i]) return null;
+      } else {
+        let t1 = (box.min[i] - p0[i]) / d;
+        let t2 = (box.max[i] - p0[i]) / d;
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+        if (t1 > tEnter) tEnter = t1;
+        if (t2 < tExit) tExit = t2;
+        if (tEnter >= tExit) return null;
+      }
+    }
+    return tEnter;
+  }
+
+  // Spatial helpers over one posed instant, shared by instant queries and
+  // the temporal sweep.
+  function spatialEngine(objects) {
+    const kids = new Map(); // group name -> present members (posed)
+    for (const o of objects.values()) {
+      if (o.parent && objects.has(o.parent)) {
+        if (!kids.has(o.parent)) kids.set(o.parent, []);
+        kids.get(o.parent).push(o);
+      }
+    }
+
+    // World bounds: shapes use their own box; a group is the union of its
+    // present members' bounds (a point at its origin if it has none).
+    function boundsOf(o) {
+      if (o.shape !== "group") return aabb(o);
+      const min = [Infinity, Infinity, Infinity];
+      const max = [-Infinity, -Infinity, -Infinity];
+      let any = false;
+      for (const c of kids.get(o.name) || []) {
+        if (c.present === false) continue;
+        const b = boundsOf(c);
+        any = true;
+        for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], b.min[i]);
+          max[i] = Math.max(max[i], b.max[i]);
+        }
+      }
+      return any ? { min, max } : { min: o.pos.slice(), max: o.pos.slice() };
+    }
+
+    function centerOf(o) {
+      const b = boundsOf(o);
+      return [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2];
+    }
+
+    // Is o inside group a or b? Members never block their own sight line.
+    function underEndpoint(o, aName, bName) {
+      let cur = o;
+      while (cur && cur.parent) {
+        if (cur.parent === aName || cur.parent === bName) return true;
+        cur = objects.get(cur.parent);
+      }
+      return false;
+    }
+
+    // Solid things blocking segment p0→p1, nearest first. Groups themselves
+    // never block (their bbox spans empty space); their members do.
+    function blockersBetween(p0, p1, a, b) {
+      const hits = [];
+      for (const o of objects.values()) {
+        if (o === a || o === b || o.shape === "group" || o.present === false) continue;
+        if (underEndpoint(o, a.name, b.name)) continue;
+        const t = segmentEntersAABB(p0, p1, aabb(o));
+        if (t !== null) hits.push({ name: o.name, t });
+      }
+      hits.sort((x, y) => x.t - y.t);
+      return hits;
+    }
+
+    function distance(a, b) {
+      const ca = centerOf(a), cb = centerOf(b);
+      const dx = ca[0] - cb[0], dy = ca[1] - cb[1], dz = ca[2] - cb[2];
+      return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    return { boundsOf, centerOf, blockersBetween, distance };
+  }
+
+  // in(a b): a's center strictly inside b's bounds (touching the boundary
+  // doesn't count, consistent with overlaps and sight-line grazing)
+  function centerInside(a, b, eng) {
+    const c = eng.centerOf(a);
+    const bb = eng.boundsOf(b);
+    return (
+      c[0] > bb.min[0] && c[0] < bb.max[0] &&
+      c[1] > bb.min[1] && c[1] < bb.max[1] &&
+      c[2] > bb.min[2] && c[2] < bb.max[2]
+    );
+  }
+
+  // Shared guard rails for a query with a set argument.
+  function validateSetQuery(q, aIsSet, bIsSet, sets, label) {
+    if (aIsSet && bIsSet) return `${label} — one set per query`;
+    if (!BOOLEAN_QUERIES.has(q.fn)) {
+      return `${label} — ${q.fn} can't take a set (sets work with ${[...BOOLEAN_QUERIES].join(", ")})`;
+    }
+    if (q.except) {
+      const setName = aIsSet ? q.args[0] : q.args[1];
+      const members = sets.get(setName);
+      const bad = q.except.find((e) => !members.includes(e));
+      if (bad) return `${label} — except(): "${bad}" isn't in ${setName}`;
+    }
+    return null;
+  }
+
+  function pairTruth(fn, a, b, eng) {
+    if (a.present === false || b.present === false) return false;
+    if (fn === "overlaps") return boxesOverlap(eng.boundsOf(a), eng.boundsOf(b));
+    if (fn === "in") return centerInside(a, b, eng);
+    return eng.blockersBetween(eng.centerOf(a), eng.centerOf(b), a, b).length === 0;
+  }
+
+  // Is the boolean query true at this posed instant? Absent objects make
+  // any predicate about them false — you can't see what isn't there.
+  // A set argument means "some member": in(suspects room) is true when
+  // any (non-excepted) member satisfies it. Returns the witness's name
+  // for sets, true for plain args, false otherwise.
+  function truthAt(q, objects, eng, sets) {
+    const expandArg = (n) => {
+      if (!objects.has(n) && sets && sets.has(n)) {
+        const ex = q.except || [];
+        return sets.get(n).filter((m) => !ex.includes(m));
+      }
+      return [n];
+    };
+    for (const an of expandArg(q.args[0])) {
+      for (const bn of expandArg(q.args[1])) {
+        const a = objects.get(an);
+        const b = objects.get(bn);
+        if (!a || !b) continue;
+        if (pairTruth(q.fn, a, b, eng)) return an !== q.args[0] ? an : bn !== q.args[1] ? bn : true;
+      }
+    }
+    return false;
+  }
+
+  // Every member that satisfies a set query at this instant — truthAt
+  // stops at the first witness (right for temporal sweeps); an instant
+  // ANSWER should name the whole candidate set.
+  function witnessesAt(q, objects, eng, sets) {
+    const ex = q.except || [];
+    const expandArg = (n) =>
+      !objects.has(n) && sets && sets.has(n) ? sets.get(n).filter((m) => !ex.includes(m)) : [n];
+    const out = [];
+    for (const an of expandArg(q.args[0])) {
+      for (const bn of expandArg(q.args[1])) {
+        const a = objects.get(an);
+        const b = objects.get(bn);
+        if (!a || !b) continue;
+        if (pairTruth(q.fn, a, b, eng)) {
+          const w = an !== q.args[0] ? an : bn !== q.args[1] ? bn : null;
+          if (w !== null) out.push(w);
+        }
+      }
+    }
+    return out;
+  }
+
+  function evalQueries(queries, objects, sets) {
+    const eng = spatialEngine(objects);
+    const { boundsOf, centerOf, blockersBetween, distance } = eng;
+    sets = sets || new Map();
+
+    return queries.map((q) => {
+      const label = `${q.quant ? q.quant + " " : ""}${q.fn}(${q.args.join(", ")})`;
+      if (q.args.length !== 2) {
+        return { line: q.line, error: true, text: `${label} — expected 2 object names` };
+      }
+      const missing = q.args.find((n) => !objects.has(n) && !sets.has(n));
+      if (missing) {
+        return { line: q.line, error: true, text: `${label} — no object or set named "${missing}"` };
+      }
+      const [a, b] = q.args.map((n) => objects.get(n));
+      const aIsSet = !a && sets.has(q.args[0]);
+      const bIsSet = !b && sets.has(q.args[1]);
+
+      if (q.quant || q.at !== null || q.check || q.fn === "adjacent") {
+        // answered once, at compile (evalTemporal/evalAdjacents) —
+        // quantified, pinned to a fixed at(time), asserted, or static;
+        // the viewport still gets a live sight line for "now"
+        const result = {
+          line: q.line, error: !!(q.temp && q.temp.error), fn: q.fn, quant: q.quant,
+          check: q.check, args: q.args,
+          value: q.temp ? q.temp.value : null,
+          text: q.temp ? q.temp.text : `${label} — not evaluated`,
+        };
+        if (q.temp && q.temp.members) result.members = q.temp.members;
+        if (!result.error && q.fn === "sees" && a && b && a.present !== false && b.present !== false) {
+          const p0 = centerOf(a), p1 = centerOf(b);
+          result.sight = { from: p0, to: p1, hits: blockersBetween(p0, p1, a, b) };
+        }
+        return result;
+      }
+
+      // a set argument: "some member" — answered with a witness
+      if (aIsSet || bIsSet) {
+        const setErr = validateSetQuery(q, aIsSet, bIsSet, sets, label);
+        if (setErr) return { line: q.line, error: true, text: setErr };
+        const other = aIsSet ? b : a;
+        if (other && other.present === false) {
+          return {
+            line: q.line, error: false, fn: q.fn, args: q.args, value: null,
+            text: `${label} → — (${other.name} not present)`,
+          };
+        }
+        const witnesses = witnessesAt(q, objects, eng, sets);
+        return {
+          line: q.line, error: false, fn: q.fn, args: q.args,
+          value: witnesses.length > 0,
+          witnesses,
+          text: `${label} → ${witnesses.length > 0}${witnesses.length ? ` (${witnesses.join(", ")})` : ""}`,
+        };
+      }
+
+      if (q.except) {
+        return { line: q.line, error: true, text: `${label} — except() needs a set argument` };
+      }
+      const result = { line: q.line, error: false, fn: q.fn, args: q.args };
+
+      // Questions about objects that don't exist right now have no answer.
+      const absent = [a, b].filter((o) => o.present === false).map((o) => o.name);
+      if (absent.length) {
+        result.value = null;
+        result.text = `${label} → — (${absent.join(", ")} not present)`;
+        return result;
+      }
+
+      switch (q.fn) {
+        case "overlaps":
+          result.value = boxesOverlap(boundsOf(a), boundsOf(b));
+          result.text = `${label} → ${result.value}`;
+          break;
+        case "in":
+          result.value = centerInside(a, b, { centerOf, boundsOf });
+          result.text = `${label} → ${result.value}`;
+          break;
+        case "distance":
+          result.value = Math.round(distance(a, b) * 100) / 100;
+          result.text = `${label} → ${result.value}`;
+          break;
+        case "sees":
+        case "blocked-by": {
+          const p0 = centerOf(a), p1 = centerOf(b);
+          const hits = blockersBetween(p0, p1, a, b);
+          // sight-line data for renderers: endpoints + where it was cut off
+          result.sight = { from: p0, to: p1, hits };
+          if (q.fn === "sees") {
+            result.value = hits.length === 0;
+            result.text = result.value
+              ? `${label} → true`
+              : `${label} → false (blocked by ${hits.map((h) => h.name).join(", ")})`;
+          } else {
+            result.value = hits.map((h) => h.name);
+            result.text = `${label} → ${result.value.length ? result.value.join(", ") : "nothing"}`;
+          }
+          break;
+        }
+      }
+      return result;
+    });
+  }
+
+  // ------------------------------------------------------ temporal queries
+  //
+  // ever/always/when quantify a boolean query over the whole timeline
+  // [0, duration] instead of one instant. Answered once, at compile: the
+  // scene is sampled at every segment boundary and lifetime event plus a
+  // dense sweep, and each truth-flip is refined by bisection, so range
+  // edges are accurate far beyond the sweep resolution. (A predicate true
+  // only inside one sweep step could still be missed — facts, sampled.)
+
+  const SWEEP_STEPS = 256;
+
+  // ------------------------------------------------------------------ facts
+  //
+  // v3 groundwork. Derive the compiled timeline into discrete GROUND
+  // FACTS an inference engine (or an LLM, or a reader) can consume. The
+  // core knows geometry, not detectives: what's exported is what IS true
+  // in the modeled world — whereabouts intervals, adjacency, sets, named
+  // times, lifetimes. Domain rules (murderer, alibi, opportunity) live
+  // OUTSIDE the language, in whatever consumes these facts.
+  function deriveFacts(compiled) {
+    // the horizon: the world persists after its last event, and a named
+    // time may point past it (time_of_death after everyone stops moving) —
+    // facts must cover wherever a rule can ask
+    const D = Math.max(compiled.duration, ...compiled.times.values(), 0);
+    const byName = new Map(compiled.objects.map((o) => [o.name, o]));
+    const rooms = compiled.objects.filter((o) => o.room);
+    // movers: things whose whereabouts mean something — not rooms, not
+    // room structure (walls, markers), not frames or derived links
+    const partOfRoom = (o) => {
+      for (let p = o.parent; p; ) {
+        const po = byName.get(p);
+        if (!po) return false;
+        if (po.room) return true;
+        p = po.parent;
+      }
+      return false;
+    };
+    const movers = compiled.objects.filter(
+      (o) => !o.room && o.shape !== "group" && o.shape !== "marker" && o.shape !== "link" && !partOfRoom(o),
+    );
+
+    const whereabouts = [];
+    if (rooms.length && movers.length) {
+      // one shared grid (segment boundaries + lifetime events + sweep),
+      // one pose pass per grid time — facts are grid-resolution, like
+      // temporal queries: sampled facts, not symbolic proofs
+      const grid = new Set([0, D]);
+      const clampD = (t) => Math.min(Math.max(t, 0), D);
+      for (const o of compiled.objects) {
+        grid.add(clampD(o.appear));
+        if (o.vanish !== null) grid.add(clampD(o.vanish));
+        if (o.track) {
+          for (const chn of ["move", "turn", "paint"]) {
+            for (const s of o.track[chn]) {
+              grid.add(clampD(s.t0));
+              grid.add(clampD(s.t1));
+            }
+          }
+        }
+      }
+      for (let i = 0; i <= SWEEP_STEPS; i++) grid.add((D * i) / SWEEP_STEPS);
+      const ts = [...grid].sort((x, y) => x - y);
+
+      const round2 = (t) => Math.round(t * 100) / 100;
+      const open = new Map(); // "mover|room" -> range start
+      const ranges = new Map(); // "mover|room" -> [[t0,t1]...]
+      for (const t of ts) {
+        const map = poseAt(compiled, t);
+        const eng = spatialEngine(map);
+        for (const m of movers) {
+          const mo = map.get(m.name);
+          for (const r of rooms) {
+            const key = m.name + "|" + r.name;
+            const inside = mo.present !== false && centerInside(mo, map.get(r.name), eng);
+            if (inside && !open.has(key)) {
+              open.set(key, t);
+            } else if (!inside && open.has(key)) {
+              if (!ranges.has(key)) ranges.set(key, []);
+              ranges.get(key).push([open.get(key), t]);
+              open.delete(key);
+            }
+          }
+        }
+      }
+      for (const [key, t0] of open) {
+        if (!ranges.has(key)) ranges.set(key, []);
+        ranges.get(key).push([t0, D]);
+      }
+      for (const m of movers) {
+        for (const r of rooms) {
+          const rs = ranges.get(m.name + "|" + r.name);
+          if (rs) whereabouts.push({ name: m.name, room: r.name, ranges: rs.map(([a, b]) => [round2(a), round2(b)]) });
+        }
+      }
+    }
+
+    return {
+      duration: D,
+      rooms: rooms.map((r) => r.name),
+      adjacent: [...compiled.adjacency].map((k) => k.split("|")),
+      sets: Object.fromEntries(compiled.sets),
+      times: Object.fromEntries(compiled.times),
+      lifetimes: movers
+        .filter((o) => o.appear > 0 || o.vanish !== null)
+        .map((o) => ({ name: o.name, appear: o.appear, vanish: o.vanish })),
+      whereabouts,
+    };
+  }
+
+  // Prolog-text rendering of compiled.facts — the exchange format for a
+  // rules layer, an engine, or an LLM. Times are timeline seconds.
+  function prologFacts(compiled) {
+    const f = compiled.facts;
+    const atom = (s) => (/^[a-z][a-zA-Z0-9_]*$/.test(s) ? s : `'${String(s).replace(/'/g, "\\'")}'`);
+    const lines = ["% ground facts derived from the scene — times in timeline seconds"];
+    if (compiled.clock) lines.push(`clock(${compiled.clock.start}, ${compiled.clock.minute}).`);
+    lines.push(`duration(${f.duration}).`);
+    for (const r of f.rooms) lines.push(`room(${atom(r)}).`);
+    for (const [a, b] of f.adjacent) {
+      lines.push(`adjacent(${atom(a)}, ${atom(b)}).`);
+      lines.push(`adjacent(${atom(b)}, ${atom(a)}).`); // symmetric, closed here so rules stay trivial
+    }
+    for (const [s, members] of Object.entries(f.sets)) {
+      for (const m of members) lines.push(`set_member(${atom(s)}, ${atom(m)}).`);
+    }
+    for (const [n, v] of Object.entries(f.times)) lines.push(`time_fact(${atom(n)}, ${v}).`);
+    for (const lt of f.lifetimes) {
+      lines.push(`lifetime(${atom(lt.name)}, ${lt.appear}, ${lt.vanish === null ? "inf" : lt.vanish}).`);
+    }
+    for (const w of f.whereabouts) {
+      for (const [t0, t1] of w.ranges) lines.push(`in(${atom(w.name)}, ${atom(w.room)}, ${t0}, ${t1}).`);
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  // adjacent(a b): a static fact read off the door(to) graph — answered
+  // once at compile, constant while scrubbing. True iff a shared door
+  // connects the two rooms directly (no transitivity; that would be a
+  // future connected()).
+  function evalAdjacents(compiled, errors) {
+    const byName = new Map(compiled.objects.map((o) => [o.name, o]));
+    for (const q of compiled.queries) {
+      if (q.fn !== "adjacent") continue;
+      const label = `${q.check ? "check " : ""}adjacent(${q.args.join(", ")})`;
+      const bad = (msg) => {
+        q.temp = { error: true, value: null, text: `${label} — ${msg}` };
+        if (q.check) errors.push({ line: q.line, msg: q.temp.text });
+      };
+      if (q.args.length !== 2) { bad("expected two room names"); continue; }
+      const notRoom = q.args.find((n) => { const o = byName.get(n); return !o || !o.room; });
+      if (notRoom !== undefined) { bad(`"${notRoom}" isn't a room — adjacency is a fact about rooms`); continue; }
+      const value = compiled.adjacency.has([q.args[0], q.args[1]].sort().join("|"));
+      q.temp = { error: false, value, text: `${label} → ${value}` };
+      if (q.check) {
+        q.temp.text = (value ? "✓ " : "✗ ") + q.temp.text;
+        if (!value) { q.temp.error = true; errors.push({ line: q.line, msg: q.temp.text }); }
+      }
+    }
+  }
+
+  function evalTemporal(compiled, errors) {
+    const temporal = compiled.queries.filter((q) => q.quant || q.at !== null);
+    if (!temporal.length) return;
+    const D = compiled.duration;
+    const names = new Set(compiled.objects.map((o) => o.name));
+
+    // with a clock, temporal answers speak wall time: "4:45–5:11"
+    const ck = compiled.clock;
+    const fmt = (t) => {
+      if (!ck) return (Math.round(t * 100) / 100).toFixed(2);
+      const totalMin = ck.start + t / ck.minute;
+      let h = Math.floor(totalMin / 60);
+      let m = Math.floor(totalMin - h * 60);
+      let s = Math.round((totalMin - h * 60 - m) * 60);
+      if (s === 60) { s = 0; m += 1; }
+      if (m === 60) { m = 0; h += 1; }
+      return `${h}:${String(m).padStart(2, "0")}` + (s ? `:${String(s).padStart(2, "0")}` : "");
+    };
+    const labelOf = (q) =>
+      `${q.check ? "check " : ""}${q.quant ? q.quant + " " : ""}${q.fn}(${q.args.join(", ")})` +
+      (q.except ? ` except(${q.except.join(" ")})` : "") +
+      (q.at !== null ? ` at(${fmt(q.at)})` : "") +
+      (q.during ? ` during(${fmt(q.during[0])} ${fmt(q.during[1])})` : "");
+
+    const fail = (q, text) => {
+      q.temp.error = true;
+      if (q.check) errors.push({ line: q.line, msg: text });
+    };
+
+    const truthOne = (q, t) => {
+      const map = poseAt(compiled, t);
+      return truthAt(q, map, spatialEngine(map), compiled.sets) !== false;
+    };
+    // lo and hi disagree; return the flip point
+    function refine(truth, lo, hi) {
+      const hiVal = truth(hi);
+      for (let i = 0; i < 24 && hi - lo > 1e-9; i++) {
+        const mid = (lo + hi) / 2;
+        if (truth(mid) === hiVal) hi = mid;
+        else lo = mid;
+      }
+      return hi;
+    }
+    // truth ranges of one predicate across sorted sample times
+    function rangesOver(ts, truth, w1) {
+      const ranges = [];
+      let start = null;
+      let prev = null;
+      for (const t of ts) {
+        const v = truth(t);
+        if (v && start === null) {
+          start = prev === null ? t : refine(truth, prev, t);
+        } else if (!v && start !== null) {
+          ranges.push([start, refine(truth, prev, t)]);
+          start = null;
+        }
+        prev = t;
+      }
+      if (start !== null) ranges.push([start, w1]);
+      return ranges;
+    }
+    const round2 = (t) => Math.round(t * 100) / 100;
+    const fmtRanges = (rs) => rs.map(([s, e]) => `${fmt(s)}–${fmt(e)}`).join(", ");
+
+    for (const q of temporal) {
+      const label = labelOf(q);
+      if (q.args.length !== 2) {
+        q.temp = { error: true, value: null, text: `${label} — expected 2 object names` };
+        if (q.check) errors.push({ line: q.line, msg: q.temp.text }); // a broken check must not pass silently
+        continue;
+      }
+      const missing = q.args.find((n) => !names.has(n) && !compiled.sets.has(n));
+      if (missing) {
+        q.temp = { error: true, value: null, text: `${label} — no object or set named "${missing}"` };
+        if (q.check) errors.push({ line: q.line, msg: q.temp.text });
+        continue;
+      }
+      const aIsSet = !names.has(q.args[0]) && compiled.sets.has(q.args[0]);
+      const bIsSet = !names.has(q.args[1]) && compiled.sets.has(q.args[1]);
+      if (aIsSet || bIsSet) {
+        const msg = validateSetQuery(q, aIsSet, bIsSet, compiled.sets, label);
+        if (msg) {
+          q.temp = { error: true, value: null, text: msg };
+          if (q.check) errors.push({ line: q.line, msg });
+          continue;
+        }
+      } else if (q.except) {
+        q.temp = { error: true, value: null, text: `${label} — except() needs a set argument` };
+        if (q.check) errors.push({ line: q.line, msg: q.temp.text });
+        continue;
+      }
+
+      // pinned to one instant: evaluate the plain query at that time
+      if (q.at !== null) {
+        const map = poseAt(compiled, q.at);
+        const inst = evalQueries(
+          [{ ...q, quant: null, at: null, check: false, temp: undefined }],
+          map,
+          compiled.sets,
+        )[0];
+        let value = inst.value;
+        let answer = inst.text.includes(" → ") ? inst.text.slice(inst.text.indexOf(" → ") + 3) : inst.text;
+        if (q.quant === "never") {
+          // "was NOT the case at that instant" — absence counts as not-there
+          value = inst.value !== true;
+          const who = inst.witnesses && inst.witnesses.length ? inst.witnesses.join(", ") : "it was";
+          answer = `${value}${inst.value === true ? ` (${who})` : ""}`;
+        }
+        q.temp = { error: false, value, text: `${label} → ${answer}` };
+        if (q.check) {
+          const ok = value === true;
+          q.temp.text = (ok ? "✓ " : "✗ ") + q.temp.text;
+          if (!ok) fail(q, q.temp.text);
+        }
+        continue;
+      }
+
+      // quantified over a window (during, or the whole timeline)
+      const w0 = q.during ? q.during[0] : 0;
+      const w1 = q.during ? q.during[1] : D;
+      const clampW = (t) => Math.min(Math.max(t, w0), w1);
+      const times = new Set([w0, w1]);
+      for (const o of compiled.objects) {
+        times.add(clampW(o.appear));
+        if (o.vanish !== null) times.add(clampW(o.vanish));
+        if (o.track) {
+          for (const chn of ["move", "turn"]) {
+            for (const s of o.track[chn]) {
+              times.add(clampW(s.t0));
+              times.add(clampW(s.t1));
+            }
+          }
+        }
+      }
+      for (let i = 0; i <= SWEEP_STEPS; i++) times.add(w0 + ((w1 - w0) * i) / SWEEP_STEPS);
+      const ts = [...times].sort((x, y) => x - y);
+
+      const ranges = rangesOver(ts, (t) => truthOne(q, t), w1);
+
+      // a set argument answers per member too: WHO, not just whether —
+      // "? never in(suspects room) during(...)" alibis everyone it can
+      // and names the residual. always stays pooled (it's a fact about
+      // the place — "never unoccupied" — not about any one member).
+      let members = null;
+      if ((aIsSet || bIsSet) && q.quant !== "always") {
+        const setName = aIsSet ? q.args[0] : q.args[1];
+        const excluded = new Set(q.except || []);
+        members = [];
+        for (const m of compiled.sets.get(setName)) {
+          if (excluded.has(m)) continue;
+          const qm = { ...q, args: aIsSet ? [m, q.args[1]] : [q.args[0], m], except: null };
+          members.push({ name: m, ranges: rangesOver(ts, (t) => truthOne(qm, t), w1) });
+        }
+      }
+      const isFull = (rs) => rs.length === 1 && rs[0][0] <= w0 + 1e-6 && rs[0][1] >= w1 - 1e-6;
+      const memberDetail = () =>
+        members
+          .map((m) => `${m.name} ${m.ranges.length === 0 ? "never" : isFull(m.ranges) ? "always" : fmtRanges(m.ranges)}`)
+          .join("; ");
+      // only the members the predicate was ever true for, with their times
+      const culprits = () =>
+        members
+          .filter((m) => m.ranges.length > 0)
+          .map((m) => `${m.name} ${isFull(m.ranges) ? "always" : fmtRanges(m.ranges)}`)
+          .join("; ");
+
+      const full = isFull(ranges);
+      // gaps: where the predicate was false, within the window
+      const gaps = [];
+      let cursor = w0;
+      for (const [s, e] of ranges) {
+        if (s - cursor > 1e-6) gaps.push([cursor, s]);
+        cursor = e;
+      }
+      if (w1 - cursor > 1e-6) gaps.push([cursor, w1]);
+
+      let value;
+      let text;
+      if (q.quant === "when") {
+        value = ranges.map(([s, e]) => [round2(s), round2(e)]);
+        text = `${label} → ${
+          members ? memberDetail() : ranges.length === 0 ? "never" : full ? "always" : fmtRanges(ranges)
+        }`;
+      } else if (q.quant === "ever") {
+        value = ranges.length > 0;
+        const detail = !value ? "" :
+          members ? ` (${culprits()})` :
+          ranges[0][0] > w0 + 1e-6 ? ` (first at ${fmt(ranges[0][0])})` : "";
+        text = `${label} → ${value}${detail}`;
+      } else if (q.quant === "never") {
+        value = ranges.length === 0;
+        text = `${label} → ${value}${value ? "" : ` (${members ? culprits() : "true " + fmtRanges(ranges)})`}`;
+      } else { // always
+        value = full;
+        text = `${label} → ${value}${value ? "" : ` (fails ${fmtRanges(gaps)})`}`;
+      }
+      q.temp = { error: false, value, text };
+      if (members) q.temp.members = members.map((m) => ({ name: m.name, ranges: m.ranges.map(([s, e]) => [round2(s), round2(e)]) }));
+      if (q.check) {
+        const ok = value === true || (q.quant === "when" && ranges.length > 0);
+        q.temp.text = (ok ? "✓ " : "✗ ") + q.temp.text;
+        if (!ok) fail(q, q.temp.text);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------- API
+
+  function compile(src) {
+    const { objects, queries, anims, errors, sets, goals, theme, view, clock, times } = parse(src);
+    expandRepeats(objects, anims, queries, errors);
+    validateLinks(objects, errors);
+    resolveAll(objects, errors);
+    const adjacency = carveDoors(objects, errors);
+    const duration = buildTracks(objects, anims, errors);
+
+    // named sets queries can quantify over: repeat families come free
+    // (every family of copies is a set), explicit `set` statements on top
+    const setMap = new Map();
+    for (const o of objects.values()) {
+      if (o.family && !o.family.includes("/")) {
+        if (!setMap.has(o.family)) setMap.set(o.family, []);
+        setMap.get(o.family).push(o.name);
+      }
+    }
+    for (const s of sets.values()) {
+      if (objects.has(s.name)) {
+        errors.push({ line: s.line, msg: `set "${s.name}" collides with an object of the same name` });
+        continue;
+      }
+      const missing = s.members.find((mn) => !objects.has(mn));
+      if (missing) {
+        errors.push({ line: s.line, msg: `set ${s.name}: no object named "${missing}"` });
+        continue;
+      }
+      setMap.set(s.name, s.members.slice());
+    }
+
+    const compiled = { objects: [...objects.values()], queries, duration, errors, theme, view, clock, times, adjacency, goals, sets: setMap };
+    evalAdjacents(compiled, errors); // failed adjacency checks are compile errors
+    evalTemporal(compiled, errors); // failed checks are compile errors
+    compiled.facts = deriveFacts(compiled); // v3 groundwork: the world as ground facts
+    errors.sort((a, b) => a.line - b.line);
+    compiled.results = sample(compiled, 0).results;
+    return compiled;
+  }
+
+  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.26.0" };
+
+  if (typeof module !== "undefined" && module.exports) module.exports = Schauplatz;
+  global.Schauplatz = Schauplatz;
+})(typeof window !== "undefined" ? window : globalThis);

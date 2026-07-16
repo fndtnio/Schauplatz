@@ -1,0 +1,32 @@
+// A spinning gear — a GROUP: a faceted hub with four teeth bolted on.
+// Turning the group turns the whole assembly around its origin.
+// The smooth cylinder spins at exactly the same speed but looks frozen
+// (rotational symmetry) — facets and teeth are what make motion visible.
+
+box bench size(5 0.4 1.8) at(0 0.2 0) color(#5b6575)
+
+cylinder smooth r(0.7) h(0.8) at(-1.4 0.8 0) color(#d9825b)
+turn smooth to(0 720 0) over(4)
+
+// a crank pin riding on the smooth wheel, phase-locked with the gear
+group crank at(-1.4 0.8 0)
+cylinder pin r(0.09) h(1) in(crank) at(0.6 0.1 0) color(gold)
+turn crank to(0 720 0) over(4)
+
+group gear at(1.4 0.8 0)
+cylinder hub r(0.55) h(0.8) sides(8) in(gear) color(#d9825b)
+box tooth-n size(0.25 0.7 0.25) in(gear) at(0 0 -0.6) color(#d9c35b)
+box tooth-s size(0.25 0.7 0.25) in(gear) at(0 0 0.6) color(#d9c35b)
+box tooth-e size(0.25 0.7 0.25) in(gear) at(0.6 0 0) color(#d9c35b)
+box tooth-w size(0.25 0.7 0.25) in(gear) at(-0.6 0 0) color(#d9c35b)
+turn gear to(0 720 0) over(4)
+
+// the coupling rod is a LINK — derived geometry: it spans the crank pin
+// and the gear tooth from their live positions, every instant, like a
+// locomotive's side rod (both wheels turn in phase, so its length holds)
+link rod between(pin tooth-e) r(0.07) color(#8a93a5)
+? distance(pin tooth-e)      // the rod's length — constant while phase-locked
+
+// after 2 seconds a ball appears above the gear and drops onto it
+sphere ball r(0.3) above(gear 1.2) appear(2) color(gold)
+move ball by(0 -1.2 0) over(0.8) ease(bounce)

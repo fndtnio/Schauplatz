@@ -1,0 +1,44 @@
+// The verdict — the smallest scene where the rules layer solves the case.
+//
+// Three suspects. Carol is alibied by placement (aviary all afternoon).
+// Bob starts unaccounted, then a witness places him in the aviary at
+// 2:30 — a leap: over(0), there at that instant, no invented path.
+// Eddie stays unaccounted. Ask the engine who could have done it:
+// the ?- goals below consult rules.pl with this scene's fact export
+// (open the facts button to read the export; run `npm run serve` —
+// the engine loads over HTTP). The answers appear in purple under the
+// query results; when exactly one name remains, the line goes bold.
+//
+// The unknown room is doing the epistemic work: people we can't place
+// are parked there, and rules.pl treats "in unknown" as "could be
+// anywhere". Alibis shrink the candidate set; the residual is the
+// verdict. Delete bob's leap and watch the answer widen to two.
+
+view top
+clock 1:00 minute(0.5)
+time time_of_death 3:00
+
+room lion_enclosure size(4 2.5 4) door(to aviary)
+room aviary size(4 2.5 4) behind(lion_enclosure)
+room unknown size(4 2.5 4) at(-9 0 -9) color(black)
+
+cylinder alice r(0.25) h(1.6) at(lion_enclosure 1 1) color(grey)   // the victim
+cylinder carol r(0.25) h(1.6) at(aviary) color(purple)
+cylinder eddie r(0.25) h(1.6) at(unknown) color(blue)
+cylinder bob r(0.25) h(1.6) at(unknown 1 0) color(red)
+
+set suspects carol eddie bob
+
+// the victim: dead in the lion enclosure at 3:00
+at time_of_death
+  turn alice to(90 0 0) over(1m) ease(in)
+  check in(alice lion_enclosure)
+end
+
+// the clue that alibis bob: seen in the aviary at 2:30
+walk bob to(aviary 1 0) start(2:30) over(0)
+check in(bob aviary) at(2:30)
+
+// the derivation: who could have been with alice, and is it one person?
+?- could(suspects, X, lion_enclosure, time_of_death)
+?- sole(suspects, X, lion_enclosure, time_of_death)

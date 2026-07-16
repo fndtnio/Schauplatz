@@ -1,0 +1,44 @@
+// Parts — teach the language a new noun. "A desk consists of..." is
+// written once and used like a shape. Parts take no parameters; the one
+// knob is uniform per-instance scale(). Parts may contain animation —
+// "a fan spins" is a fact — and every instance runs its own.
+
+theme paper
+
+part desk
+  box top size(1.4 0.08 0.7) at(0 0.76 0)
+  box leg1 size(0.08 0.72 0.08) at(-0.62 0.36 -0.27)
+  box leg2 size(0.08 0.72 0.08) at(0.62 0.36 -0.27)
+  box leg3 size(0.08 0.72 0.08) at(-0.62 0.36 0.27)
+  box leg4 size(0.08 0.72 0.08) at(0.62 0.36 0.27)
+end
+
+part chair
+  box seat size(0.45 0.06 0.45) at(0 0.45 0)
+  box back size(0.45 0.55 0.06) at(0 0.76 -0.2)
+  box legA size(0.05 0.42 0.05) at(-0.18 0.21 -0.18)
+  box legB size(0.05 0.42 0.05) at(0.18 0.21 -0.18)
+  box legC size(0.05 0.42 0.05) at(-0.18 0.21 0.18)
+  box legD size(0.05 0.42 0.05) at(0.18 0.21 0.18)
+end
+
+part fan
+  cylinder stem r(0.03) h(0.25) at(0 -0.125 0)
+  group hub at(0 -0.25 0)
+  box bladeA in(hub) size(1 0.02 0.14) at(0 0 0)
+  box bladeB in(hub) size(0.14 0.02 1) at(0 0 0)
+  turn hub by(0 1440 0) over(8)
+end
+
+room study size(5 2.5 4) door(south 1.2)
+
+desk d1  in(study) at(-1.2 0 -1.2) color(#8b5e3c)
+chair ch1 in(study) in-front-of(d1 0.1) color(#a3703f)
+desk d2  in(study) at(1.5 0 -1.2) scale(0.7) color(#5b6575)  // the child's desk
+chair ch2 in(study) in-front-of(d2 0.1) scale(0.7) color(#a3703f)
+fan f1   in(study) at(0 2.5 0.5)
+
+sphere vase r(0.12) in(study) on(d1) color(tomato)
+
+? distance(d1 d2)
+? sees(vase ch2)
