@@ -1,0 +1,68 @@
+// The Vanishing Lady — a stage illusion, certified by geometry.
+//
+// Same machinery as the mysteries, opposite job: a detective scene
+// proves someone WAS seen; a magic trick is an engineered guarantee
+// that six pairs of eyes NEVER see the swap. If any check below goes
+// red, the illusion is blown.
+//
+// The secret, stated plainly (the scene is the text): the lady has a
+// twin, hidden in the right cabinet since before the house opened.
+// The lady enters the left cabinet, drops through the trapdoor (a
+// leap — honest: there at that instant, path unseen), and the twin
+// steps out across the stage. The audience proves the rest.
+
+theme paper
+
+// the stage: two cabinets with SIDE doors (facing the wings — the
+// audience looks at blank fronts), and the backstage behind a backdrop
+// (the backdrop IS the backstage's south wall)
+room left_cabinet size(1.2 2.2 1.2) at(-3 0 0) door(west)
+room right_cabinet size(1.2 2.2 1.2) at(3 0 0) door(east)
+room backstage size(12 3 2) at(0 0 -2.6) door(west)
+
+// footlights, waiting for the reveal
+sphere footlight r(0.15) at(-4 0.15 2.2) color(#8a8578) repeat(2) spread(8 0 0)
+
+// the company
+cylinder magician r(0.26) h(1.85) at(0 0.925 1.4) color(#22304a)
+cylinder lady r(0.24) h(1.68) at(-7 0.84 1.6) color(#c8451f)
+cylinder twin r(0.24) h(1.68) at(right_cabinet 0 0) color(#c8451f)   // identical dress
+set performers magician lady twin
+
+// the house: six spectators — a repeat family is a set, so `viewer`
+// below quantifies over every pair of eyes at once
+cylinder viewer r(0.22) h(1.5) at(-3 0.75 6) color(#3d7fa6) repeat(6) spread(1.2 0 0)
+
+// --- the act -------------------------------------------------------------
+// beat 1: the lady crosses the stage in full view and enters the left
+// cabinet by its wing door
+walk lady to(left_cabinet-west-door) start(1) over(2)
+walk lady to(left_cabinet) over(1)
+
+// beat 2: the flourish (all eyes on the magician)
+turn magician by(0 360 0) start(4.5) over(1) ease(in-out)
+
+// beat 3: the trapdoor — under the stage and up behind the backdrop
+walk lady to(backstage 0 0) start(5) over(0)
+
+// beat 4: the twin steps out of the right cabinet and takes the bow
+walk twin to(right_cabinet-east-door) start(6) over(1)
+walk twin to(1 1.8) over(1.5)
+paint footlight to(#e0a33a) start(8.5)     // the reveal, in gold
+turn twin by(0 -360 0) start(9) over(1) ease(out)
+
+// --- the certification ---------------------------------------------------
+check in(twin right_cabinet) at(0.5)             // the secret is in place early
+check never sees(viewer twin) during(0 6)        // no one sees her before the reveal
+check never sees(viewer lady) during(5.5 10)     // and no one sees the lady again
+check sees(viewer-3 twin) at(8.5)                // front row, full view, "impossible"
+check never in(performers left_cabinet) at(10)   // the cabinet ends EMPTY
+check always in(lady backstage) during(5 10)     // where she actually is, from the instant she drops
+
+? blocked-by(viewer-3 twin) at(3)     // what hides the secret: a cabinet wall
+? when sees(viewer-3 lady)            // the front row's view of the lady...
+? when sees(viewer-3 twin)            // ...and of the twin: they never overlap
+
+// the rules layer is domain-neutral — same present_at that clears
+// murder suspects certifies a magic trick
+?- present_at(lady, backstage, 8)
