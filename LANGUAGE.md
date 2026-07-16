@@ -672,9 +672,14 @@ in(frida, radio_room, 6.09, 27).
 ```
 
 What's exported: rooms, the `door(to)` adjacency graph, sets, named
-times, lifetimes, and per-object room-presence intervals (for every
+times, lifetimes, per-object room-presence intervals (for every
 non-structural object — people and props alike, so "was the killer
-ever in the room with the screwdriver" is answerable rule-side).
+ever in the room with the screwdriver" is answerable rule-side), and
+**sight intervals** — `visible(a, b, t0, t1)`, `sees()` published as
+data, exported for **set members only** (the cast you've named is the
+cast rules reason about; all-pairs would be quadratic). With them,
+"is every crate on camera" is one rule-side double negation — see
+`all_visible`/`unseen` in rules.pl and `examples/storeroom.scene`.
 Intervals are grid-resolution (segment boundaries + the sweep), same
 honesty clause as temporal queries: sampled facts, not symbolic
 proofs. The language itself contains no detective concepts — rules

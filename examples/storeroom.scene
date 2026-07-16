@@ -1,0 +1,51 @@
+// The storeroom audit — surveillance as derivable fact.
+//
+// One camera, high in the corner. Five crates. The question a guard
+// signs their name to every night: does the camera see ALL of them?
+// In rules.pl that is one double negation —
+//     all_visible(W, Set, T) :- \+ (set_member(Set, C), \+ visible_at(W, C, T)).
+// "there is no crate it fails to see." The scene exports visible/4
+// (sight intervals for set members — sees() published as data), and
+// the engine answers. When the answer is no, unseen/4 NAMES the blind
+// spot. No detective anywhere: same facts, different vocabulary.
+
+theme blueprint
+time audit_1 2
+time audit_2 9
+
+room storeroom size(9 3 6) door(south 1.4)
+
+// the camera: a small box mounted high in the north-west corner
+box cam size(0.3 0.3 0.35) at(-4 2.6 -2.6) color(#222428)
+set cams cam
+
+// shelving mid-room — tall enough to shadow the far corner
+box shelf_low size(2.2 1.2 0.9) at(0.8 0.6 0.4) color(#3a4150)
+box shelf_top size(2.2 1.2 0.9) on(shelf_low) color(#3a4150)
+
+// the stock
+box crate_a size(0.8 0.8 0.8) at(-2.6 0.4 1.4) color(#8a7040)
+box crate_b size(0.8 0.8 0.8) at(-1 0.4 -1.6) color(#8a7040)
+box crate_c size(0.8 0.8 0.8) at(3.4 0.4 1.8) color(#8a7040)   // in the shelf's shadow
+box crate_d size(0.8 0.8 0.8) at(2.6 0.4 -1.8) color(#8a7040)
+box crate_e size(0.8 0.8 0.8) on(crate_a) color(#8a7040)
+set crates crate_a crate_b crate_c crate_d crate_e
+
+// the night guard does the rounds and fixes what the first audit finds:
+// at t=5 the blind crate gets dragged into the open
+cylinder guard r(0.26) h(1.75) at(-3.5 0.875 2.2) color(#2cb494)
+set staff guard
+walk guard to(3.4 2.3) start(3) over(2)
+move crate_c to(-0.5 0.4 2.3) start(5) over(1.5)
+walk guard to(-3.5 2.2) start(7) over(2)
+
+// --- the audit, in language ----------------------------------------------
+check never sees(cam crate_c) during(0 5)      // the blind spot is real...
+check sees(cam crate_c) at(audit_2)            // ...and the fix took
+? when sees(cam guard)                          // the guard's own coverage
+? blocked-by(cam crate_c) at(audit_1)           // what hides it: the shelving
+
+// --- the audit, derived --------------------------------------------------
+?- all_visible(cam, crates, audit_1)
+?- unseen(cam, crates, audit_1, C)
+?- all_visible(cam, crates, audit_2)

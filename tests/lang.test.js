@@ -1889,6 +1889,47 @@ test("facts: the world derived as ground facts (v3 substrate)", () => {
   assert.ok(!f.whereabouts.some((w) => w.name.includes("-")));
 });
 
+test("facts: visible intervals — sees() published as data, for set members", () => {
+  const c = compile(
+    "room store size(8 2.5 6) door(south)\n" +
+      "box cam size(0.3 0.3 0.3) at(-3.5 2 -2.5)\n" +
+      "box wall_stack size(1.5 2 1) at(0 1 0)\n" +
+      "box crate_open size(0.8 0.8 0.8) at(-2 0.4 1.5)\n" +
+      "box crate_hidden size(0.8 0.8 0.8) at(1.6 0.4 1.2)\n" + // behind the stack from cam
+      "cylinder guard r(0.25) h(1.7) at(-3 0.85 1.5)\n" +
+      "walk guard to(3 1.5) start(1) over(2)\n" + // crosses behind the stack
+      "set cams cam\n" +
+      "set crates crate_open crate_hidden\n" +
+      "set staff guard",
+  );
+  assert.deepEqual(c.errors, []);
+  const pair = (a, b) => c.facts.visible.find((v) => (v.a === a && v.b === b) || (v.a === b && v.b === a));
+  assert.ok(pair("cam", "crate_open"), "clear pair exports intervals");
+  assert.ok(!pair("cam", "wall_stack"), "non-set objects get no sight facts");
+  const hidden = pair("cam", "crate_hidden");
+  assert.ok(!hidden || hidden.ranges.length === 0); // never visible: no fact (or empty)
+  const g = pair("cam", "guard");
+  assert.equal(g.ranges.length, 1);
+  assert.ok(g.ranges[0][1] < 2.5, "the guard walks out of coverage and stays out");
+  assert.ok(pair("cam", "crate_open").ranges.length >= 2, "the guard's body briefly blocks the crate");
+});
+
+test("facts: prolog emits visible/4 both directions; rules helpers exist", () => {
+  const { prolog } = require("../lang.js");
+  const c = compile(
+    "box a size(0.5 0.5 0.5) at(-2 0.25 0)\n" +
+      "box b size(0.5 0.5 0.5) at(2 0.25 0)\n" +
+      "set things a b",
+  );
+  const text = prolog(c);
+  assert.match(text, /visible\(a, b, 0, 0\)\./); // static scene: the t=0 instant
+  assert.match(text, /visible\(b, a, 0, 0\)\./);
+  const rules = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "rules.pl"), "utf8");
+  for (const head of ["visible_at", "all_visible", "unseen"]) {
+    assert.ok(new RegExp("^" + head + "\\(", "m").test(rules), head + " defined in rules.pl");
+  }
+});
+
 test("facts: prolog text renders atoms safely and closes symmetry", () => {
   const { prolog } = require("../lang.js");
   const c = compile(
@@ -1913,6 +1954,49 @@ test("set errors: the guard rails", () => {
   assert.match(d.results[0].text, /distance can't take a set/);
   const e = compile("box a\nbox b\n? in(a b) except(a)");
   assert.match(e.results[0].text, /except\(\) needs a set/);
+});
+
+test("spindle: the checkpoint is a sight line — a lagging kinetochore is occluded until it congresses", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "examples", "spindle.scene"), "utf8");
+  const c = compile(src);
+  assert.deepEqual(c.errors, []);
+
+  const pair = (a, b) => c.facts.visible.find((v) => (v.a === a && v.b === b) || (v.a === b && v.b === a));
+  const seenAt = (a, b, t) => { const v = pair(a, b); return !!v && v.ranges.some(([t0, t1]) => t0 <= t && t <= t1); };
+  const early = c.facts.times.metaphase_early, late = c.facts.times.metaphase_late;
+
+  // bi-orientation = each sister seen by its own pole. Early, the lagging
+  // chromosome's left kinetochore is hidden from the left pole; congression fixes it.
+  for (const k of ["chr1_l", "chr2_l", "chr3_l"]) assert.ok(seenAt("pole_l", k, early), `${k} attached early`);
+  assert.ok(!seenAt("pole_l", "chr4_l", early), "chr4_l is unattached to the left pole at metaphase_early");
+  assert.ok(seenAt("pole_l", "chr4_l", late), "chr4_l attaches once it congresses");
+  for (const k of ["chr1_r", "chr2_r", "chr3_r", "chr4_r"]) assert.ok(seenAt("pole_r", k, early), `${k} attached early`);
+
+  // sight facts export for set members only — the plate boxes are all in sets,
+  // but the poles must be too (they are, via `set poles`) for the pairs to exist
+  assert.ok(pair("pole_l", "chr1_l"), "pole/kinetochore sight is exported");
+});
+
+test("gene regulation: compartment crossing is the fact, combinatorial logic reads off it", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "examples", "gene-regulation.scene"), "utf8");
+  const c = compile(src);
+  assert.deepEqual(c.errors, []);
+
+  // the pore is a door(to): adjacency exports both directions
+  assert.ok(c.facts.adjacent.some(([a, b]) => a === "cytoplasm" && b === "nucleus"));
+
+  // import/export show up as whereabouts intervals — the localisation the
+  // rules layer reasons over. tf_b (the second signal) enters after tf_a.
+  const nucleusRange = (name) => {
+    const w = c.facts.whereabouts.find((w) => w.name === name && w.room === "nucleus");
+    return w ? w.ranges : [];
+  };
+  const inAt = (name, t) => nucleusRange(name).some(([t0, t1]) => t0 <= t && t <= t1);
+  const { basal, early, active } = c.facts.times;
+  assert.ok(!inAt("tf_a", basal) && !inAt("tf_b", basal), "no activator in the nucleus at basal");
+  assert.ok(inAt("tf_a", early) && !inAt("tf_b", early), "only the first activator is in at early");
+  assert.ok(inAt("tf_a", active) && inAt("tf_b", active), "both activators in at active");
+  assert.ok(inAt("repressor", basal) && !inAt("repressor", active), "the repressor is exported by active");
 });
 
 // ----------------------------------------------- examples are fixtures too

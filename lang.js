@@ -2362,10 +2362,22 @@
       }
     }
 
+    // one pose = one box per object: aabb() does rotation math, and a
+    // sight sweep asks for the same boxes once per PAIR without this
+    const boxCache = new Map();
+    function aabbOf(o) {
+      let b = boxCache.get(o);
+      if (!b) {
+        b = aabb(o);
+        boxCache.set(o, b);
+      }
+      return b;
+    }
+
     // World bounds: shapes use their own box; a group is the union of its
     // present members' bounds (a point at its origin if it has none).
     function boundsOf(o) {
-      if (o.shape !== "group") return aabb(o);
+      if (o.shape !== "group") return aabbOf(o);
       const min = [Infinity, Infinity, Infinity];
       const max = [-Infinity, -Infinity, -Infinity];
       let any = false;
@@ -2401,13 +2413,23 @@
     function blockersBetween(p0, p1, a, b) {
       const hits = [];
       for (const o of objects.values()) {
-        if (o === a || o === b || o.shape === "group" || o.present === false) continue;
+        if (o === a || o === b || o.shape === "group" || o.shape === "marker" || o.present === false) continue;
         if (underEndpoint(o, a.name, b.name)) continue;
-        const t = segmentEntersAABB(p0, p1, aabb(o));
+        const t = segmentEntersAABB(p0, p1, aabbOf(o));
         if (t !== null) hits.push({ name: o.name, t });
       }
       hits.sort((x, y) => x.t - y.t);
       return hits;
+    }
+
+    // boolean form for sweeps: the first blocker settles it
+    function anyBlocker(p0, p1, a, b) {
+      for (const o of objects.values()) {
+        if (o === a || o === b || o.shape === "group" || o.shape === "marker" || o.present === false) continue;
+        if (underEndpoint(o, a.name, b.name)) continue;
+        if (segmentEntersAABB(p0, p1, aabbOf(o)) !== null) return true;
+      }
+      return false;
     }
 
     function distance(a, b) {
@@ -2416,7 +2438,7 @@
       return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    return { boundsOf, centerOf, blockersBetween, distance };
+    return { boundsOf, centerOf, blockersBetween, anyBlocker, distance };
   }
 
   // in(a b): a's center strictly inside b's bounds (touching the boundary
@@ -2450,7 +2472,7 @@
     if (a.present === false || b.present === false) return false;
     if (fn === "overlaps") return boxesOverlap(eng.boundsOf(a), eng.boundsOf(b));
     if (fn === "in") return centerInside(a, b, eng);
-    return eng.blockersBetween(eng.centerOf(a), eng.centerOf(b), a, b).length === 0;
+    return !eng.anyBlocker(eng.centerOf(a), eng.centerOf(b), a, b);
   }
 
   // Is the boolean query true at this posed instant? Absent objects make
@@ -2644,8 +2666,20 @@
       (o) => !o.room && o.shape !== "group" && o.shape !== "marker" && o.shape !== "link" && !partOfRoom(o),
     );
 
+    // sight facts are exported for SET MEMBERS only — the cast you've
+    // named is the cast rules reason about. All-pairs would be
+    // O(n²·sweep) and grind big scenes on every compile.
+    const cast = [...new Set([...compiled.sets.values()].flat())]
+      .map((n) => byName.get(n))
+      .filter((o) => o && o.shape !== "group" && o.shape !== "marker");
+    const castPairs = [];
+    for (let i = 0; i < cast.length; i++) {
+      for (let j = i + 1; j < cast.length; j++) castPairs.push([cast[i], cast[j]]);
+    }
+
     const whereabouts = [];
-    if (rooms.length && movers.length) {
+    const visible = [];
+    if ((rooms.length && movers.length) || castPairs.length) {
       // one shared grid (segment boundaries + lifetime events + sweep),
       // one pose pass per grid time — facts are grid-resolution, like
       // temporal queries: sampled facts, not symbolic proofs
@@ -2667,35 +2701,44 @@
       const ts = [...grid].sort((x, y) => x - y);
 
       const round2 = (t) => Math.round(t * 100) / 100;
-      const open = new Map(); // "mover|room" -> range start
-      const ranges = new Map(); // "mover|room" -> [[t0,t1]...]
+      const open = new Map(); // "a|b" -> range start (rooms and sight share)
+      const ranges = new Map(); // "a|b" -> [[t0,t1]...]
+      const track = (key, truth, t) => {
+        if (truth && !open.has(key)) {
+          open.set(key, t);
+        } else if (!truth && open.has(key)) {
+          if (!ranges.has(key)) ranges.set(key, []);
+          ranges.get(key).push([open.get(key), t]);
+          open.delete(key);
+        }
+      };
       for (const t of ts) {
         const map = poseAt(compiled, t);
         const eng = spatialEngine(map);
         for (const m of movers) {
           const mo = map.get(m.name);
           for (const r of rooms) {
-            const key = m.name + "|" + r.name;
-            const inside = mo.present !== false && centerInside(mo, map.get(r.name), eng);
-            if (inside && !open.has(key)) {
-              open.set(key, t);
-            } else if (!inside && open.has(key)) {
-              if (!ranges.has(key)) ranges.set(key, []);
-              ranges.get(key).push([open.get(key), t]);
-              open.delete(key);
-            }
+            track(m.name + "|" + r.name, mo.present !== false && centerInside(mo, map.get(r.name), eng), t);
           }
+        }
+        for (const [a, b] of castPairs) {
+          track(a.name + "@" + b.name, pairTruth("sees", map.get(a.name), map.get(b.name), eng), t);
         }
       }
       for (const [key, t0] of open) {
         if (!ranges.has(key)) ranges.set(key, []);
         ranges.get(key).push([t0, D]);
       }
+      const rounded = (rs) => rs.map(([a, b]) => [round2(a), round2(b)]);
       for (const m of movers) {
         for (const r of rooms) {
           const rs = ranges.get(m.name + "|" + r.name);
-          if (rs) whereabouts.push({ name: m.name, room: r.name, ranges: rs.map(([a, b]) => [round2(a), round2(b)]) });
+          if (rs) whereabouts.push({ name: m.name, room: r.name, ranges: rounded(rs) });
         }
+      }
+      for (const [a, b] of castPairs) {
+        const rs = ranges.get(a.name + "@" + b.name);
+        if (rs) visible.push({ a: a.name, b: b.name, ranges: rounded(rs) });
       }
     }
 
@@ -2709,6 +2752,7 @@
         .filter((o) => o.appear > 0 || o.vanish !== null)
         .map((o) => ({ name: o.name, appear: o.appear, vanish: o.vanish })),
       whereabouts,
+      visible,
     };
   }
 
@@ -2734,6 +2778,13 @@
     }
     for (const w of f.whereabouts) {
       for (const [t0, t1] of w.ranges) lines.push(`in(${atom(w.name)}, ${atom(w.room)}, ${t0}, ${t1}).`);
+    }
+    for (const v of f.visible || []) {
+      // sight is symmetric (center-to-center); closed here so rules stay trivial
+      for (const [t0, t1] of v.ranges) {
+        lines.push(`visible(${atom(v.a)}, ${atom(v.b)}, ${t0}, ${t1}).`);
+        lines.push(`visible(${atom(v.b)}, ${atom(v.a)}, ${t0}, ${t1}).`);
+      }
     }
     return lines.join("\n") + "\n";
   }
@@ -3012,7 +3063,7 @@
     return compiled;
   }
 
-  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.28.1" };
+  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.29.0" };
 
   if (typeof module !== "undefined" && module.exports) module.exports = Schauplatz;
   global.Schauplatz = Schauplatz;

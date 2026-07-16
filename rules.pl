@@ -10,6 +10,7 @@
 % Fact vocabulary (see LANGUAGE.md "Fact export"):
 %   room(R).  adjacent(A, B).  set_member(Set, X).
 %   in(X, Room, T0, T1).  time_fact(Name, Seconds).  lifetime(X, T0, T1).
+%   visible(A, B, T0, T1).  — sight intervals, exported for SET MEMBERS
 
 % X is in room R at time T (interval ends inclusive — a leap arrives
 % exactly at its instant, and final-instant facts are real).
@@ -51,3 +52,48 @@ cleared(Set, X, R, TN, Where) :-
 sole(Set, X, R, TN) :-
     could(Set, X, R, TN),
     \+ (could(Set, Y, R, TN), Y \= X).
+
+% ---- sight ---------------------------------------------------------------
+% visible/4 is sees() published as data: intervals where the line
+% between two set members' centers is clear and both are present.
+
+visible_at(A, B, T) :- visible(A, B, T0, T1), T0 =< T, T =< T1.
+ever_visible(A, B) :- visible(A, B, _, _).
+
+% Surveillance: does Watcher see EVERY member of Set at named time TN?
+% (Double negation — "there is no member it fails to see".)
+%   ?- all_visible(camera, crates, audit)
+all_visible(Watcher, Set, TN) :-
+    time_fact(TN, T),
+    \+ (set_member(Set, C), C \= Watcher, \+ visible_at(Watcher, C, T)).
+
+% The blind spot, named: which member does Watcher NOT see at TN?
+%   ?- unseen(camera, crates, audit, C)
+unseen(Watcher, Set, TN, C) :-
+    time_fact(TN, T),
+    set_member(Set, C),
+    C \= Watcher,
+    \+ visible_at(Watcher, C, T).
+
+% ---- gene regulation -----------------------------------------------------
+% Combinatorial control read off localisation: which factors are in the
+% nucleus, when, is the scene's whereabouts export (in/4); this states the
+% logic that turns a gene on. Quantified over sets, at a named time.
+
+all_present(Set, R, T)  :- \+ (set_member(Set, X), \+ present_at(X, R, T)).
+none_present(Set, R, T) :- \+ (set_member(Set, X), present_at(X, R, T)).
+
+% the gene is ON at named time TN: every activator is in room R and no
+% repressor is — a coincidence detector, not any one factor's presence.
+%   ?- expressed(activators, repressors, nucleus, active)
+expressed(Acts, Reps, R, TN) :-
+    time_fact(TN, T),
+    all_present(Acts, R, T),
+    none_present(Reps, R, T).
+
+% which required activator has not reached room R yet at TN — the
+% "still waiting on" of the AND gate.  ?- awaiting(activators, nucleus, early, X)
+awaiting(Acts, R, TN, X) :-
+    time_fact(TN, T),
+    set_member(Acts, X),
+    \+ present_at(X, R, T).
