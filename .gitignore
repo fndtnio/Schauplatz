@@ -1,6 +1,7 @@
 # personal notes & local workflow (not for the public repo)
 *.org
 sync.sh
+merge.sh
 exclude.txt
 # OS noise
 .DS_Store

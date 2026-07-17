@@ -368,7 +368,10 @@ move/turn), take `start/after/over/ease`, and the first segment chains
 from `appear()`. There is no `by()` (colors don't add) and no `from()`
 (a paint chains from the previous color; before the first paint, the
 object wears its declared `color()`, or the palette pick if none).
-Links may be painted; groups and doorway markers may not (no surface).
+Links may be painted, and so may **rooms** — painting a room paints its
+walls, the same surfaces its `color()` owns (door segments, sills and
+lintels included). Plain groups and doorway markers may not (no
+surface).
 
 Color has **zero semantic weight**: no query reads it, no bound depends
 on it. It exists for the humans watching — dim the ruled-out weapons at
@@ -680,6 +683,12 @@ data, exported for **set members only** (the cast you've named is the
 cast rules reason about; all-pairs would be quadratic). With them,
 "is every crate on camera" is one rule-side double negation — see
 `all_visible`/`unseen` in rules.pl and `examples/storeroom.scene`.
+Also **order facts** — `left_of(a, b)` for set members (rooms
+included), sampled where things **end up**, so a deduction-time
+timeline exports its solved arrangement. rules.pl derives
+`immediately_left_of`, `next_to`, and `at_end` within a peer set, and
+`exactly_one` certifies one-member-per-room and names it — the zebra
+puzzle certificate (`examples/zebra.scene`).
 Intervals are grid-resolution (segment boundaries + the sweep), same
 honesty clause as temporal queries: sampled facts, not symbolic
 proofs. The language itself contains no detective concepts — rules

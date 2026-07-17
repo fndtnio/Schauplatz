@@ -1,0 +1,91 @@
+// Zebra Puzzle — Jeremy's first, upgraded with the proof block.
+//
+// In the festive spirit of Christmas morning, four kids from
+// neighboring families each unwrap a unique present in their
+// differently colored houses. Match every child with their house
+// color, full name, and gift.
+//
+// The timeline is DEDUCTION time: each clue lands at its own second
+// (paint = a color deduced, a walk = a kid placed), so scrubbing
+// replays the solve — the thing a logic grid can't show. The ?- goals
+// at the bottom are the certificate: order facts (left_of) are
+// exported from where everything ENDS UP, so the engine checks the
+// solved arrangement against every clue.
+//
+// house colors - blue, green, pink, white
+// first names  - Ian, Patrick, Ulysses, Wyatt
+// surnames     - Jackson, King, Quinn, Young
+// gifts        - jigsaw puzzle, robot, science kit, skateboard
+
+view top
+theme paper
+time solved 14
+
+room house_1 door(south)
+room house_2 at(5 0 0) door(south)
+room house_3 at(10 0 0) door(south)
+room house_4 at(15 0 0) door(south)
+set houses house_1 house_2 house_3 house_4
+
+room unknown size(4 2.5 4) at(-7 0 0) color(black)
+
+cylinder boy_ian r(0.25) h(1.6) at(unknown 0 0) color(grey)
+cylinder boy_patrick r(0.25) h(1.6) at(unknown 0 1) color(purple)
+cylinder boy_ulysses r(0.25) h(1.6) at(unknown 1 0) color(blue)
+cylinder boy_wyatt r(0.25) h(1.6) at(unknown 1 1) color(red)
+set boys boy_ian boy_patrick boy_ulysses boy_wyatt
+
+// labels as artifacts: gifts and surnames live IN their houses
+box skateboard size(0.3 0.1 0.2) at(house_2 0 1) color(darkgrey)
+box science_kit size(0.3 0.1 0.2) at(house_1 0 1) color(green)
+box jigsaw_puzzle size(0.3 0.1 0.2) at(house_4 0 1) color(blue)
+box robot size(0.3 0.1 0.2) at(house_3 0 1) color(grey)
+set gifts skateboard science_kit jigsaw_puzzle robot
+
+box surname_young size(0.3 0.1 0.2) at(house_1 0 -1)
+box surname_quinn size(0.3 0.1 0.2) at(house_2 0 -1)
+box surname_jackson size(0.3 0.1 0.2) at(house_3 0 -1)
+box surname_king size(0.3 0.1 0.2) at(house_4 0 -1)
+set surnames surname_young surname_quinn surname_jackson surname_king
+
+// --- the deduction, one clue per second ---------------------------------
+// 1. The boy who got a Skateboard lives in the second house.
+// 2. The Quinn kid got a Skateboard for Christmas.
+// 3. The kid with the surname Young lives at the first house.
+// 4. The Young boy got a Science kit for Christmas.
+// 5. The boy who received a Jigsaw puzzle lives at one of the ends —
+//    the first house is taken, so the fourth.
+// 6. The kid living in the White house is next to the one who got the
+//    Jigsaw puzzle — so the third house is white.
+paint house_3 to(white) start(6)
+// 7. The King family lives at one of the ends — the fourth.
+// 8. The White house is immediately to the right of the Blue house.
+paint house_2 to(blue) start(8)
+// 9. Patrick lives in the third house.
+walk boy_patrick to(house_3) start(9) over(0)
+// 10. The kid who received a Robot is next to the one living in the
+//     Pink house — the robot is in the third, so pink is the fourth,
+//     and green is what's left for the first.
+paint house_4 to(pink) start(10)
+paint house_1 to(green) start(10)
+// 11. Ulysses lives directly to the left of Wyatt — with the third
+//     house taken, that means the first and second...
+walk boy_ulysses to(house_1) start(11) over(0)
+walk boy_wyatt to(house_2) start(11) over(0)
+// 12. ...and Ian gets the fourth.
+walk boy_ian to(house_4) start(12) over(0)
+
+// --- the certificate ------------------------------------------------------
+// every positional clue, checked against the solved arrangement:
+?- immediately_left_of(houses, house_2, house_3)   // clue 8: white right of blue
+?- next_to(houses, house_3, house_4)               // clue 6: white next to the jigsaw
+?- at_end(houses, house_4)                          // clues 5 & 7: jigsaw and King at an end
+?- immediately_left_of(boys, boy_ulysses, boy_wyatt)  // clue 11
+// one gift per house, each named:
+?- exactly_one(gifts, house_1, solved, G)
+?- exactly_one(gifts, house_2, solved, G)
+?- exactly_one(gifts, house_3, solved, G)
+?- exactly_one(gifts, house_4, solved, G)
+// and one boy per house:
+?- exactly_one(boys, house_3, solved, B)
+check in(boy_patrick house_3) at(solved)           // clue 9, in-language

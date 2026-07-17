@@ -1932,6 +1932,23 @@
         continue;
       }
       if (a.kind === "paint" && (obj.shape === "group" || obj.shape === "marker")) {
+        if (obj.room) {
+          // painting a ROOM paints its walls — the same surfaces its
+          // color() owns at birth (segments, sills and lintels included).
+          // Runs post-carve, so it lands on the real wall pieces.
+          for (const w of objects.values()) {
+            if (w.parent !== obj.name || w.shape !== "box") continue;
+            const wkey = w.name + "/paint";
+            const wcur = cursors.get(wkey) || { end: w.appear + (w.clockShift || 0), lastTo: null };
+            const wt0 = a.start !== null ? a.start + (a.startShift || 0) : wcur.end + (a.after || 0);
+            const wt1 = wt0 + a.over;
+            if (!w.track) w.track = { move: [], turn: [], paint: [] };
+            w.track.paint.push({ t0: wt0, t1: wt1, from: wcur.lastTo !== null ? wcur.lastTo : w.color, to: a.to, ease: a.ease });
+            cursors.set(wkey, { end: wt1, lastTo: a.to });
+            if (wt1 > duration) duration = wt1;
+          }
+          continue;
+        }
         errors.push({
           line: a.line,
           msg: obj.shape === "group"
@@ -2669,9 +2686,12 @@
     // sight facts are exported for SET MEMBERS only — the cast you've
     // named is the cast rules reason about. All-pairs would be
     // O(n²·sweep) and grind big scenes on every compile.
-    const cast = [...new Set([...compiled.sets.values()].flat())]
+    const castAll = [...new Set([...compiled.sets.values()].flat())]
       .map((n) => byName.get(n))
-      .filter((o) => o && o.shape !== "group" && o.shape !== "marker");
+      .filter((o) => o && o.shape !== "marker");
+    // sight pairs: shapes only; order admits groups too (rooms in a
+    // set get left_of facts — the zebra houses)
+    const cast = castAll.filter((o) => o.shape !== "group");
     const castPairs = [];
     for (let i = 0; i < cast.length; i++) {
       for (let j = i + 1; j < cast.length; j++) castPairs.push([cast[i], cast[j]]);
@@ -2742,6 +2762,21 @@
       }
     }
 
+    // order facts: where things ENDED UP — the horizon pose, so a
+    // deduction-time timeline exports its SOLVED arrangement. Set
+    // members only, like sight. left_of(a, b): a's center is west
+    // (-x) of b's, matching the left-of placement relation.
+    const leftOf = [];
+    if (castAll.length >= 2) {
+      const endMap = poseAt(compiled, D);
+      for (const a of castAll) {
+        for (const b of castAll) {
+          if (a === b) continue;
+          if (endMap.get(a.name).pos[0] < endMap.get(b.name).pos[0] - 1e-6) leftOf.push([a.name, b.name]);
+        }
+      }
+    }
+
     return {
       duration: D,
       rooms: rooms.map((r) => r.name),
@@ -2753,6 +2788,7 @@
         .map((o) => ({ name: o.name, appear: o.appear, vanish: o.vanish })),
       whereabouts,
       visible,
+      leftOf,
     };
   }
 
@@ -2785,6 +2821,9 @@
         lines.push(`visible(${atom(v.a)}, ${atom(v.b)}, ${t0}, ${t1}).`);
         lines.push(`visible(${atom(v.b)}, ${atom(v.a)}, ${t0}, ${t1}).`);
       }
+    }
+    for (const [a, b] of f.leftOf || []) {
+      lines.push(`left_of(${atom(a)}, ${atom(b)}).`); // end-of-timeline arrangement
     }
     return lines.join("\n") + "\n";
   }
@@ -3063,7 +3102,7 @@
     return compiled;
   }
 
-  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.29.0" };
+  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.30.0" };
 
   if (typeof module !== "undefined" && module.exports) module.exports = Schauplatz;
   global.Schauplatz = Schauplatz;

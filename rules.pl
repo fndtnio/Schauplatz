@@ -75,25 +75,30 @@ unseen(Watcher, Set, TN, C) :-
     C \= Watcher,
     \+ visible_at(Watcher, C, T).
 
-% ---- gene regulation -----------------------------------------------------
-% Combinatorial control read off localisation: which factors are in the
-% nucleus, when, is the scene's whereabouts export (in/4); this states the
-% logic that turns a gene on. Quantified over sets, at a named time.
+% ---- order -----------------------------------------------------------------
+% left_of(A, B) facts describe the END of the timeline — where things
+% settled (a deduction-time scene exports its solved arrangement).
+% "Immediately" and "ends" only mean something within a PEER GROUP, so
+% these take the set: a gift box between two houses shouldn't break
+% "the houses are neighbors".
 
-all_present(Set, R, T)  :- \+ (set_member(Set, X), \+ present_at(X, R, T)).
-none_present(Set, R, T) :- \+ (set_member(Set, X), present_at(X, R, T)).
+immediately_left_of(Set, A, B) :-
+    set_member(Set, A), set_member(Set, B),
+    left_of(A, B),
+    \+ (set_member(Set, C), left_of(A, C), left_of(C, B)).
 
-% the gene is ON at named time TN: every activator is in room R and no
-% repressor is — a coincidence detector, not any one factor's presence.
-%   ?- expressed(activators, repressors, nucleus, active)
-expressed(Acts, Reps, R, TN) :-
+next_to(Set, A, B) :- immediately_left_of(Set, A, B).
+next_to(Set, A, B) :- immediately_left_of(Set, B, A).
+
+at_end(Set, A) :- set_member(Set, A), \+ (set_member(Set, C), left_of(C, A)).
+at_end(Set, A) :- set_member(Set, A), \+ (set_member(Set, C), left_of(A, C)).
+
+% ---- counting --------------------------------------------------------------
+% Exactly one member of Set is in room R at named time TN — and X is
+% the one. The zebra certificate: one gift per house, named.
+%   ?- exactly_one(gifts, house_1, solved, G)
+exactly_one(Set, R, TN, X) :-
     time_fact(TN, T),
-    all_present(Acts, R, T),
-    none_present(Reps, R, T).
-
-% which required activator has not reached room R yet at TN — the
-% "still waiting on" of the AND gate.  ?- awaiting(activators, nucleus, early, X)
-awaiting(Acts, R, TN, X) :-
-    time_fact(TN, T),
-    set_member(Acts, X),
-    \+ present_at(X, R, T).
+    set_member(Set, X),
+    present_at(X, R, T),
+    \+ (set_member(Set, Y), Y \= X, present_at(Y, R, T)).
