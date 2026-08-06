@@ -71,8 +71,13 @@
   }
   #output .result { color: var(--ok); }
   #output .error { color: var(--err); }
-  #output .goal { color: #b58fd9; } /* rules-layer answers: derived, not stated */
+  #output .goal { color: #b58fd9; margin: 2px 0; } /* rules-layer answers: derived, not stated */
   #output .goal-sole { font-weight: 700; } /* one answer left: the verdict */
+  /* several answers left: an OPEN block — border marks where it starts and ends */
+  #output .goal-multi { border-left: 2px solid rgba(181, 143, 217, 0.4); padding-left: 8px; margin: 6px 0; }
+  #output .goal-answer { padding-left: 3ch; }
+  #output .goal-tally { padding-left: 3ch; color: var(--dim); }
+  #output .goal-settled { font-weight: 700; color: #b58fd9; }
 
   #view { flex: 1; position: relative; min-width: 0; }
   #view canvas { display: block; }
@@ -82,8 +87,9 @@
     color: var(--text); padding: 1px 8px; border-radius: 4px; font-size: 12px;
   }
   body.no-editor header, body.no-editor #left { display: none; }
-  body.no-editor #output.empty { display: none; }
-  body.no-editor #output {
+  body.editor-collapsed #left { display: none; } /* collapse: viewport full-width, header stays */
+  body.no-editor #output.empty, body.editor-collapsed #output.empty { display: none; }
+  body.no-editor #output, body.editor-collapsed #output {
     position: absolute; top: 12px; left: 12px; z-index: 5;
     max-width: 46%; max-height: 42%; overflow-y: auto;
     background: rgba(29, 32, 38, 0.88); border: 1px solid var(--border);
@@ -144,6 +150,18 @@
   #facts-panel .facts-hint { color: var(--dim); font-size: 12px; margin-right: auto; }
   #facts-body { font-size: 12.5px; line-height: 1.55; background: var(--bg); padding: 12px 16px; border-radius: 6px; overflow-x: auto; }
 
+  /* ---- zoom lever: explicit zoom, top-right of the viewport ---- */
+  #zoom-ctl {
+    position: absolute; top: 12px; right: 12px; z-index: 6;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  #zoom-ctl button {
+    width: 32px; height: 32px; font-size: 17px; line-height: 1;
+    background: rgba(29, 32, 38, 0.9); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; cursor: pointer;
+  }
+  #zoom-ctl button:hover { background: rgba(45, 50, 60, 0.95); }
+
   /* fixed width + tabular digits: if this span breathes while the wall
      clock ticks, the flexed slider resizes mid-drag and the thumb jumps */
   #transport #clock { color: var(--dim); min-width: 19ch; text-align: right; font-variant-numeric: tabular-nums; }
@@ -156,6 +174,7 @@
   <span class="hint">everything is code — the 3D is just a view</span>
   <span class="spacer"></span>
   <select id="examples" hidden><option value="">examples…</option></select>
+  <button id="code-toggle" title="cmd+\">hide code</button>
   <button id="axes">axes</button>
   <button id="spec">spec</button>
   <button id="facts">facts</button>
@@ -191,6 +210,10 @@
   </div>
   <div id="view">
     <div id="hover-label"></div>
+    <div id="zoom-ctl">
+      <button id="zoom-in" title="zoom in (=)">+</button>
+      <button id="zoom-out" title="zoom out (−)">−</button>
+    </div>
     <div id="transport" hidden>
       <button id="play">⏸</button>
       <input id="scrub" type="range" min="0" max="1" step="0.01" value="0">
@@ -208,12 +231,12 @@ const EXAMPLE = `// Schauplatz v0 — a scene is a set of facts, not draw calls.
 
 box crate    size(1.2 1.2 1.2) color(#8b5e3c)
 sphere ball  r(0.35) on(crate) color(tomato)
-cylinder can r(0.25) h(0.8) left-of(crate) color(seagreen)
+cylinder can r(0.25) h(0.8) west-of(crate) color(seagreen)
 
 box plank    size(2.4 0.1 0.6) above(crate 0.8) color(#d9c35b)
 sphere pea   r(0.15) on(plank) color(hotpink)
 
-box wall     size(4 2 0.2) behind(crate 1) color(#5b6575)
+box wall     size(4 2 0.2) north-of(crate 1) color(#5b6575)
 
 // queries are statements too — answers appear below the editor,
 // and sight lines are drawn in the view (green = clear, red = blocked)
@@ -267,6 +290,7 @@ if (embedScene) {
       window.framePending = true;
       editor.setValue(text);
       currentName = embedScene.split("/").pop().replace(/\.scene$/, "");
+      if (embedScene.endsWith(".scene") && !embedScene.includes("//")) currentPath = embedScene;
     })
     .catch((err) => {
       document.getElementById("output").innerHTML =
@@ -280,6 +304,7 @@ document.getElementById("reset").addEventListener("click", () => {
   window.framePending = true;
   editor.setValue(EXAMPLE);
   currentName = "scene";
+  currentPath = null;
 });
 
 document.getElementById("new").addEventListener("click", () => {
@@ -289,6 +314,7 @@ document.getElementById("new").addEventListener("click", () => {
   window.framePending = true;
   editor.setValue("// untitled\n");
   currentName = "untitled";
+  currentPath = null;
   document.getElementById("examples").value = "";
   editor.focus();
 });
@@ -349,6 +375,22 @@ document.addEventListener("keydown", (e) => {
 // The dropdown needs the folder served over HTTP (fetch can't read
 // neighboring files from file://). "open…" and "save" work everywhere.
 let currentName = "scene"; // basename for save
+let currentPath = null; // repo-relative path, when known — dev-server save writes here
+
+// local write-back: `node serve.js` answers this probe, and save then
+// writes the buffer to its file instead of downloading. Static hosts
+// (GitHub Pages, iframes, python -m http.server) fail the probe and
+// keep the download — fully non-breaking.
+let devBackend = false;
+fetch("__dev")
+  .then((r) => (r.ok ? r.json() : null))
+  .then((d) => {
+    if (d && d.dev) {
+      devBackend = true;
+      document.getElementById("save").title = "write back to the file (dev server) — cmd+s";
+    }
+  })
+  .catch(() => {});
 
 const exampleSelect = document.getElementById("examples");
 fetch("examples/manifest.json")
@@ -373,6 +415,7 @@ exampleSelect.addEventListener("change", async () => {
     window.framePending = true;
     editor.setValue(await r.text());
     currentName = file.replace(/\.scene$/, "");
+    currentPath = "examples/" + file;
   } catch (err) {
     output.innerHTML = `<div class="error">couldn't load ${file}: ${err.message}</div>`;
   }
@@ -386,11 +429,33 @@ fileInput.addEventListener("change", async () => {
   window.framePending = true;
   editor.setValue(await file.text());
   currentName = file.name.replace(/\.(scene|txt)$/, "");
+  currentPath = null; // a picked file's disk location is unknowable from the browser
   exampleSelect.value = "";
   fileInput.value = "";
 });
 
-document.getElementById("save").addEventListener("click", () => {
+async function saveScene() {
+  if (devBackend) {
+    let p = currentPath;
+    if (!p) {
+      p = prompt("save to path", currentName + ".scene");
+      if (!p) return;
+      if (!p.endsWith(".scene")) p += ".scene";
+    }
+    try {
+      const r = await fetch(p, { method: "PUT", body: editor.getValue() });
+      if (!r.ok) throw new Error((await r.text()) || "HTTP " + r.status);
+      currentPath = p;
+      currentName = p.split("/").pop().replace(/\.scene$/, "");
+      const b = document.getElementById("save");
+      const label = b.textContent;
+      b.textContent = "saved ✓";
+      setTimeout(() => (b.textContent = label), 900);
+    } catch (err) {
+      alert("save failed: " + err.message);
+    }
+    return;
+  }
   const name = prompt("save as", currentName + ".scene");
   if (!name) return;
   currentName = name.replace(/\.scene$/, "");
@@ -400,6 +465,13 @@ document.getElementById("save").addEventListener("click", () => {
   a.download = name.endsWith(".scene") ? name : name + ".scene";
   a.click();
   URL.revokeObjectURL(a.href);
+}
+document.getElementById("save").addEventListener("click", saveScene);
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+    e.preventDefault();
+    saveScene();
+  }
 });
 
 // ------------------------------------------------------------ compile loop
@@ -457,10 +529,36 @@ function renderResults(results) {
     .join("");
 }
 
+// ---- collapse the editor: viewport full-width, results float over it.
+// Independent of ?editor=0 (embeds hide everything, including this button).
+const codeToggle = document.getElementById("code-toggle");
+function setEditorCollapsed(on) {
+  document.body.classList.toggle("editor-collapsed", on);
+  (on ? document.getElementById("view") : document.getElementById("left")).appendChild(output);
+  codeToggle.textContent = on ? "show code" : "hide code";
+  localStorage.setItem("schauplatz-collapsed", on ? "1" : "");
+  if (!on) editor.refresh(); // CodeMirror sat in display:none
+}
+if (showEditor) {
+  codeToggle.addEventListener("click", () =>
+    setEditorCollapsed(!document.body.classList.contains("editor-collapsed")));
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+      e.preventDefault();
+      setEditorCollapsed(!document.body.classList.contains("editor-collapsed"));
+    }
+  });
+  if (localStorage.getItem("schauplatz-collapsed") === "1") setEditorCollapsed(true);
+} else {
+  codeToggle.hidden = true;
+}
+
 // any output row that knows its line jumps the editor there on click
 output.addEventListener("click", (e) => {
   const row = e.target.closest("[data-line]");
   if (!row || !row.dataset.line || document.body.classList.contains("no-editor")) return;
+  // a click on a result while collapsed reopens the code and jumps to it
+  if (document.body.classList.contains("editor-collapsed")) setEditorCollapsed(false);
   const ln = parseInt(row.dataset.line, 10) - 1;
   editor.setCursor({ line: ln, ch: 0 });
   editor.scrollIntoView({ line: ln, ch: 0 }, 80);
@@ -479,6 +577,13 @@ output.addEventListener("click", (e) => {
 function renderGaps() {
   const el = document.getElementById("gap-lines");
   if (!el) return;
+  // an empty viewport should never be a mystery: a scene of only part
+  // definitions renders nothing until a part is instanced
+  if (!latest.errors.length && !latest.objects.length && latest.parts && latest.parts.length) {
+    const p = latest.parts[0];
+    el.innerHTML = `<div class="goal-warn">⚠ nothing to render — a part is a noun, not an object; instance one: ${p} my_${p}</div>`;
+    return;
+  }
   const f = latest.facts;
   if (!f || !f.whereabouts || !f.whereabouts.length) { el.innerHTML = ""; return; }
   const H = f.duration;
@@ -557,7 +662,9 @@ function runGoals(compiled) {
   for (const o of compiled.objects || []) vocab.add(o.name);
   if (compiled.sets) for (const [s, members] of compiled.sets) { vocab.add(s); members.forEach((m) => vocab.add(m)); }
   if (compiled.times) for (const n of compiled.times.keys()) vocab.add(n);
-  if (rulesText) for (const m of rulesText.matchAll(/^([a-z][A-Za-z0-9_]*)\(/gm)) vocab.add(m[1]);
+  // any functor rules.pl mentions counts — heads, called predicates, and
+  // constraint terms like among()/one_of() that only appear inside clauses
+  if (rulesText) for (const m of rulesText.matchAll(/\b([a-z][A-Za-z0-9_]*)\(/g)) vocab.add(m[1]);
   const lintOf = (g) => {
     if (!rulesText) return "";
     const toks = g.goal.match(/'[^']*'|\b[a-z][A-Za-z0-9_]*/g) || []; // \b: don't match the tail of a Variable
@@ -603,7 +710,11 @@ function runGoals(compiled) {
     function step() {
       session.answer({
         success: (a) => {
-          const s = pl.format_answer(a).replace(/\s*;\s*$/, "").replace(/\.$/, "");
+          let s = pl.format_answer(a).replace(/\s*;\s*$/, "").replace(/\.$/, "");
+          // Tau prints pairs in prefix form: -(slate,scales) — write them
+          // the way rules.pl does: slate-scales (loop handles nesting)
+          let prev;
+          do { prev = s; s = s.replace(/-\(([^(),]+),([^(),]+)\)/g, "$1-$2"); } while (s !== prev);
           answers.push(s === "true" ? "true" : s);
           if (answers.length < 16) step();
           else finish();
@@ -615,13 +726,32 @@ function runGoals(compiled) {
     }
     function finish() {
       const n = answers.length;
-      texts[i] = line(
-        g,
-        n === 0 ? "→ no" : `→ ${answers.join(" · ")}${n > 1 ? ` (${n} answers)` : ""}`,
-        n === 1 ? "goal goal-sole" : "goal",
-      );
+      if (n <= 1) {
+        texts[i] = line(g, n === 0 ? "→ no" : `→ ${answers[0]}`, n === 1 ? "goal goal-sole" : "goal");
+      } else {
+        // several worlds survive: one answer per line, and name what's
+        // already forced — a pair present in EVERY answer is a deduction
+        // even while the rest stays open
+        const rows = answers.map((s) => `<div class="goal-answer">${s}</div>`).join("");
+        const settled = settledAcross(answers);
+        // no "still open" editorial: several answers can mean an
+        // underdetermined search (pair_up narrowing) OR a complete
+        // enumeration (exactly_one over every room) — only the author
+        // knows which question they asked
+        const tally = `<div class="goal-tally">${n}${n >= 16 ? "+" : ""} answers` +
+          (settled ? ` — in all of them: <span class="goal-settled">${settled}</span>` : "") + "</div>";
+        texts[i] = line(g, `→ ${rows}${tally}`, "goal goal-multi");
+      }
       paint();
       askGoal(i + 1);
+    }
+    function settledAcross(list) {
+      // pair tokens (a-b) per answer, quoted atoms stripped so a name
+      // like 'well-seg-1' can't masquerade as a pair
+      const sets = list.map((s) =>
+        new Set(s.replace(/'[^']*'/g, "").match(/\b[a-z]\w*-[a-z]\w*\b/g) || []));
+      if (!sets.length || !sets[0].size) return "";
+      return [...sets[0]].filter((p) => sets.every((x) => x.has(p))).join(", ");
     }
   }
 }
@@ -654,8 +784,15 @@ const scene = new THREE.Scene();
 let camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
 camera.position.set(6, 8, 9); // high enough to see into rooms (dollhouse view)
 
+// gentler wheel/pinch, and wide dolly bounds — trackpad pinch was jumpy
+function tameControls(c) {
+  c.enableDamping = true;
+  c.zoomSpeed = 0.65;
+  c.minDistance = 0.5;
+  c.maxDistance = 600;
+}
 let controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+tameControls(controls);
 controls.target.set(0, 1, 0);
 
 // ------------------------------------------------------------ view (scene)
@@ -680,16 +817,55 @@ function applyView(name) {
   }
   controls.dispose();
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
+  tameControls(controls);
   controls.target.copy(target);
   window.framePending = true;
   resize();
 }
 
+// --------------------------------------------------------------- zoom lever
+// Explicit zoom that never depends on the trackpad: +/− buttons and the
+// =/− keys. Perspective zooms by dollying toward the orbit target;
+// ortho views (iso/top) zoom the frustum.
+function zoomBy(f) {
+  if (camera.isOrthographicCamera) {
+    camera.userData.halfH = Math.min(400, Math.max(1, (camera.userData.halfH || 8) * f));
+    resize();
+  } else {
+    const v = camera.position.clone().sub(controls.target);
+    const d = Math.min(600, Math.max(0.6, v.length() * f));
+    camera.position.copy(controls.target).add(v.setLength(d));
+  }
+}
+document.getElementById("zoom-in").addEventListener("click", () => zoomBy(0.75));
+document.getElementById("zoom-out").addEventListener("click", () => zoomBy(1 / 0.75));
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.target.closest?.(".CodeMirror, input, textarea")) return;
+  if (e.key === "=" || e.key === "+") zoomBy(0.8);
+  if (e.key === "-" || e.key === "_") zoomBy(1 / 0.8);
+});
+
 // ------------------------------------------------------------------ themes
 // A theme is a whole-scene look: environment + how materials are built.
 // The language core only carries the name (compiled.theme); everything
 // visual about a theme lives here, in the renderer, where it belongs.
+// Materials are DATA — a small vocabulary any theme (including custom
+// ones from themes.json) can speak: kind standard|toon|lambert|basic,
+// plus roughness/metalness/opacity/transparent/depthWrite. flatShading
+// follows sides() automatically.
+function buildMaterial(spec, color, o) {
+  const m = spec || { kind: "standard", roughness: 0.65 };
+  const common = { color, flatShading: !!o.sides };
+  if (m.transparent) Object.assign(common, { transparent: true, opacity: m.opacity ?? 0.5, depthWrite: m.depthWrite !== false });
+  if (m.depthWrite === false) common.depthWrite = false;
+  switch (m.kind) {
+    case "toon": return new THREE.MeshToonMaterial(common);
+    case "lambert": return new THREE.MeshLambertMaterial(common);
+    case "basic": return new THREE.MeshBasicMaterial(common);
+    default: return new THREE.MeshStandardMaterial({ ...common, roughness: m.roughness ?? 0.65, metalness: m.metalness ?? 0 });
+  }
+}
+
 const SCENE_THEMES = {
   default: {
     bg: 0x16181d,
@@ -698,8 +874,7 @@ const SCENE_THEMES = {
     grid: { big: 0x333845, small: 0x232630 },
     shadowOpacity: 0.3,
     palette: ["#5b8dd9", "#d9825b", "#6fbf8e", "#c778c7", "#d9c35b", "#7fb8c9"],
-    material: (color, o) =>
-      new THREE.MeshStandardMaterial({ color, roughness: 0.65, flatShading: !!o.sides }),
+    material: { kind: "standard", roughness: 0.65 },
     outline: 0,
     edges: null,
   },
@@ -711,8 +886,7 @@ const SCENE_THEMES = {
     grid: { big: 0xdcd2c2, small: 0xe8e0d2 },
     shadowOpacity: 0.14,
     palette: ["#e3a49e", "#a5c3e0", "#a9d4af", "#d3b2da", "#e4d1a1", "#9ecfd6"],
-    material: (color, o) =>
-      new THREE.MeshStandardMaterial({ color, roughness: 1.0, flatShading: !!o.sides }),
+    material: { kind: "standard", roughness: 1.0 },
     outline: 0,
     edges: null,
   },
@@ -725,8 +899,7 @@ const SCENE_THEMES = {
     grid: { big: 0xc9c9c9, small: 0xe8e8e8 },
     shadowOpacity: 0.1,
     palette: ["#f2f2f2", "#dedede", "#cccccc", "#f2f2f2", "#dedede", "#cccccc"],
-    material: (color, o) =>
-      new THREE.MeshToonMaterial({ color, flatShading: !!o.sides }),
+    material: { kind: "toon" },
     outline: 0.018, // absolute line half-weight in world units
     outlineColor: 0x1a1a1a,
     edges: null,
@@ -740,8 +913,7 @@ const SCENE_THEMES = {
     shadowOpacity: 0, // drawings don't cast shadows
     palette: ["#dce9f7", "#bcd4ec", "#9fc2e4", "#dce9f7", "#bcd4ec", "#9fc2e4"],
     // x-ray fills: depthWrite off so you can see through to objects behind
-    material: (color, o) =>
-      new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.25, depthWrite: false }),
+    material: { kind: "lambert", transparent: true, opacity: 0.25, depthWrite: false },
     outline: 0,
     edges: 0xeaf2fb, // white line work on boxes and faceted cylinders
   },
@@ -755,8 +927,7 @@ const SCENE_THEMES = {
     shadowOpacity: 0.15,
     shadowColor: 0x22304a, // shadows printed in ink, not black
     palette: ["#c8451f", "#1f7a6d", "#3d7fa6", "#b98a1d", "#7a4fa0", "#5a7a1f"],
-    material: (color, o) =>
-      new THREE.MeshToonMaterial({ color, flatShading: !!o.sides }),
+    material: { kind: "toon" },
     outline: 0.018,
     outlineColor: 0x22304a, // navy ink lines
     edges: null,
@@ -770,8 +941,7 @@ const SCENE_THEMES = {
     grid: { big: 0x263349, small: 0x1a2334 },
     shadowOpacity: 0.5,
     palette: ["#f40404", "#0c48cc", "#2cb494", "#88409c", "#f88c14", "#fcfc38"],
-    material: (color, o) =>
-      new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0.35, flatShading: !!o.sides }),
+    material: { kind: "standard", roughness: 0.35, metalness: 0.35 },
     outline: 0,
     edges: null,
     ring: 0x22dd44, // selection-circle green
@@ -792,8 +962,7 @@ const SCENE_THEMES = {
     // the doors) — heavy shadow blacks out every floor indoors
     shadowOpacity: 0.22,
     palette: ["#8a8d94", "#6e7178", "#9a9489", "#7d8087", "#8f8a80", "#767a80"],
-    material: (color, o) =>
-      new THREE.MeshStandardMaterial({ color, roughness: 0.5, flatShading: !!o.sides }),
+    material: { kind: "standard", roughness: 0.5 },
     outline: 0,
     edges: null,
   },
@@ -809,8 +978,7 @@ const SCENE_THEMES = {
     grid: { big: 0xb4c0d1, small: 0xd3dce8 },
     shadowOpacity: 0.18, // unused while ground is opaque; kept for symmetry
     palette: ["#4a5a75", "#7a4a45", "#3f6a5a", "#8a7040", "#5d4a6b", "#496b7d"],
-    material: (color, o) =>
-      new THREE.MeshStandardMaterial({ color, roughness: 0.75, flatShading: !!o.sides }),
+    material: { kind: "standard", roughness: 0.75 },
     outline: 0,
     edges: null,
   },
@@ -874,10 +1042,69 @@ function applyEnvironment(name) {
     grid.geometry.dispose();
     grid.material.dispose();
   }
-  grid = new THREE.GridHelper(20, 20, t.grid.big, t.grid.small);
+  makeGrid(t);
+}
+
+// ------------------------------------------- environment follows the scene
+// Grid span, ground plane and the sun's shadow frustum were fixed sizes
+// from the room-scale era; a flight map overflows all three. Sized from
+// the compiled bounds across the WHOLE timeline (a plane covers ground).
+let gridSpan = 20;
+function makeGrid(t) {
+  if (grid) {
+    scene.remove(grid);
+    grid.geometry.dispose();
+    grid.material.dispose();
+  }
+  const cell = gridSpan <= 30 ? 1 : gridSpan <= 120 ? 5 : 10; // coarser lines on big maps
+  grid = new THREE.GridHelper(gridSpan, Math.round(gridSpan / cell), t.grid.big, t.grid.small);
   scene.add(grid);
 }
+function sizeEnvironment(c) {
+  let radius = 8;
+  if (c && c.objects.length) {
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (const t of [0, c.duration / 2, c.duration]) { // endpoints + midpoint: covers travel
+      for (const o of Schauplatz.sample(c, t).objects) {
+        if (o.shape === "group" || o.shape === "marker") continue;
+        const half = [o.dims.w / 2, o.dims.h / 2, o.dims.d / 2];
+        for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], o.pos[i] - half[i]);
+          max[i] = Math.max(max[i], o.pos[i] + half[i]);
+        }
+      }
+    }
+    if (min[0] < Infinity) {
+      radius = Math.max(8, Math.abs(min[0]), Math.abs(max[0]), Math.abs(min[2]), Math.abs(max[2]));
+    }
+  }
+  const span = Math.max(20, Math.ceil((radius * 2.3) / 10) * 10);
+  ground.scale.set(span / 60, span / 60, 1); // ground geometry is 60x60
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -(radius + 6);
+  sun.shadow.camera.right = sun.shadow.camera.top = radius + 6;
+  sun.shadow.camera.updateProjectionMatrix();
+  if (span !== gridSpan) {
+    gridSpan = span;
+    makeGrid(SCENE_THEMES[currentThemeName] || SCENE_THEMES.default);
+  }
+}
 applyEnvironment("default");
+
+// custom themes: themes.json beside the playground — pure data, the
+// same vocabulary as the built-ins (colors as "#hex" strings). Missing
+// fields inherit from the default theme; entries may also override
+// built-ins. Shareable: a theme is a JSON object, not code.
+fetch("themes.json")
+  .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+  .then((custom) => {
+    for (const [name, spec] of Object.entries(custom)) {
+      SCENE_THEMES[name] = { ...SCENE_THEMES.default, ...spec };
+    }
+    currentThemeName = null; // force re-apply against the merged set
+    if (compiled) window.onCompiled(compiled);
+  })
+  .catch(() => {}); // file:// or no themes.json — built-ins only
 
 // -------------------------------------------------------- scene rebuilding
 const objectGroup = new THREE.Group();
@@ -980,9 +1207,21 @@ window.onCompiled = function (c) {
   compiled = c;
   lastResultsText = null;
   const themeName = c.theme && SCENE_THEMES[c.theme] ? c.theme : "default";
+  // the core no longer validates theme names (custom themes exist) —
+  // the warning lives here, where the theme list actually is
+  if (c.theme && !SCENE_THEMES[c.theme]) {
+    const g = document.getElementById("gap-lines");
+    if (g) {
+      g.insertAdjacentHTML(
+        "afterbegin",
+        `<div class="goal-warn">⚠ unknown theme "${c.theme}" (have: ${Object.keys(SCENE_THEMES).join(", ")}) — using default</div>`,
+      );
+    }
+  }
   const theme = SCENE_THEMES[themeName];
   applyEnvironment(themeName);
   applyView(c.view || "free");
+  sizeEnvironment(c);
 
   for (const mesh of objectGroup.children) {
     mesh.geometry.dispose(); // outline hulls share this geometry...
@@ -1028,7 +1267,7 @@ window.onCompiled = function (c) {
     if (o.shape === "group" || o.shape === "marker") return; // frames & doorway markers: no geometry
     const mesh = new THREE.Mesh(
       geometryFor(o),
-      theme.material(resolveColor(o.color, paletteSlot.get(o.family || o.name), theme.palette), o),
+      buildMaterial(theme.material, resolveColor(o.color, paletteSlot.get(o.family || o.name), theme.palette), o),
     );
     mesh.castShadow = mesh.receiveShadow = true;
     mesh.userData.name = o.name;
@@ -1175,7 +1414,23 @@ renderer.domElement.addEventListener("pointermove", (e) => {
   if (hit) {
     hovered = hit.object;
     hovered.material.emissive.set(0x222a38);
-    hoverLabel.textContent = hovered.userData.name;
+    // possession rides the label: a concealed thing (held at its
+    // holder's center) is invisible by honest geometry — the hover is
+    // where the fact shows. Time-aware: take/drop hand-offs change the
+    // answer as the playhead moves.
+    const holderNow = (o) => {
+      if (!o || !o.possession) return null;
+      const iv = o.possession.intervals.find((v) => animT >= v.t0 && (v.t1 === null || animT < v.t1));
+      return iv ? iv.holder : null;
+    };
+    const hn = hovered.userData.name;
+    let label = hn;
+    const ho = (latest.objects || []).find((o) => o.name === hn);
+    const holds = (latest.objects || []).filter((o) => holderNow(o) === hn).map((o) => o.name);
+    if (holds.length) label += ` — holds: ${holds.join(", ")}`;
+    const hb = holderNow(ho);
+    if (hb) label += ` — held by ${hb}`;
+    hoverLabel.textContent = label;
     hoverLabel.style.display = "block";
     hoverLabel.style.left = e.clientX - view.getBoundingClientRect().left + 12 + "px";
     hoverLabel.style.top = e.clientY - view.getBoundingClientRect().top + 12 + "px";

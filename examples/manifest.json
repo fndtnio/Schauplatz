@@ -5,6 +5,7 @@
   "trucking.scene",
   "bounce.scene",
   "motor.scene",
+  "piston.scene",
   "timing.scene",
   "orbit.scene",
   "traffic-light.scene",
@@ -18,7 +19,11 @@
   "orient-express.scene",
   "vanishing-lady.scene",
   "storeroom.scene",
-  "spindle.scene",
-  "gene-regulation.scene",
-   "zebra.scene"    
+  "zebra.scene",
+  "locked-manor.scene",
+  "prolog-1-facts.scene",
+  "prolog-2-rules.scene",
+  "template-murdle.scene",
+  "template-murdle-liars.scene",
+  "template-mystery.scene"
 ]

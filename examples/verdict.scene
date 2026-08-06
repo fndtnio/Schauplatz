@@ -19,7 +19,7 @@ clock 1:00 minute(0.5)
 time time_of_death 3:00
 
 room lion_enclosure size(4 2.5 4) door(to aviary)
-room aviary size(4 2.5 4) behind(lion_enclosure)
+room aviary size(4 2.5 4) north-of(lion_enclosure)
 room unknown size(4 2.5 4) at(-9 0 -9) color(black)
 
 cylinder alice r(0.25) h(1.6) at(lion_enclosure 1 1) color(grey)   // the victim
@@ -37,7 +37,7 @@ end
 
 // the clue that alibis bob: seen in the aviary at 2:30
 walk bob to(aviary 1 0) start(2:30) over(0)
-check in(bob aviary) at(2:30)
+check always in(bob aviary) during(2:30 3:30)   // ...and stays there
 
 // the derivation, as a case file: the eliminations (with each alibi
 // named), the remaining candidates, and the verdict

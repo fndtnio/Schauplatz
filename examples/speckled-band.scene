@@ -17,8 +17,8 @@ time time_of_death 3:16
 // three bedrooms in a row, doors onto the corridor — and the vent,
 // declared from Roylott's side (he had it built)
 room roylott_room size(4 2.8 4) at(-4.4 0 0) color(#6a5a4a) door(to corridor) window(to julia_room 0.35 0.35 2.1)
-room julia_room size(4 2.8 4) right-of(roylott_room) door(to corridor)
-room helen_room size(4 2.8 4) right-of(julia_room) door(to corridor)
+room julia_room size(4 2.8 4) east-of(roylott_room) door(to corridor)
+room helen_room size(4 2.8 4) east-of(julia_room) door(to corridor)
 room corridor size(13.2 2.8 2) at(0 0 3.4) color(#4a4f5a)
 
 // Julia's room: the bed is clamped to the floor beside the shared wall

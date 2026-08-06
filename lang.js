@@ -12,23 +12,30 @@
 
   const SHAPES = new Set(["box", "sphere", "cylinder"]);
 
+  // Horizontal relations speak COMPASS (north = -z, matching door/window
+  // sides and the north-up top view) — camera-relative names lied the
+  // moment you orbited. The old egocentric names error with the mapping.
   const RELATIONS = new Set([
     "on", "above", "below",
-    "left-of", "right-of", "in-front-of", "behind",
+    "west-of", "east-of", "south-of", "north-of",
   ]);
+
+  const LEGACY_RELATIONS = {
+    "left-of": "west-of", "right-of": "east-of",
+    "in-front-of": "south-of", behind: "north-of",
+  };
 
   const DEFAULT_GAP = {
     on: 0, above: 0.5, below: 0.5,
-    "left-of": 0.25, "right-of": 0.25, "in-front-of": 0.25, behind: 0.25,
+    "west-of": 0.25, "east-of": 0.25, "south-of": 0.25, "north-of": 0.25,
   };
 
-  const QUERIES = new Set(["overlaps", "distance", "sees", "blocked-by", "in", "adjacent"]);
-  const BOOLEAN_QUERIES = new Set(["sees", "overlaps", "in"]); // quantifiable / checkable
+  const QUERIES = new Set(["overlaps", "distance", "sees", "blocked-by", "in", "adjacent", "carries"]);
+  const BOOLEAN_QUERIES = new Set(["sees", "overlaps", "in", "carries"]); // quantifiable / checkable
 
   // Themes are a whole-scene rendering hint: zero semantic effect (bounds,
   // sight lines, and queries ignore them). The core only validates the name
   // and passes it through; renderers decide what a theme looks like.
-  const THEMES = new Set(["ink", "clay", "blueprint", "noir", "paper", "rts", "snow"]);
 
   // Like themes, views are a whole-scene rendering hint with zero semantic
   // effect: the projection and starting vantage the scene asks for.
@@ -68,7 +75,7 @@
   // ---------------------------------------------------------------- parsing
 
   const RESERVED = new Set([
-    ...SHAPES, "group", "room", "link", "part", "end", "move", "turn", "orbit", "walk", "paint", "time",
+    ...SHAPES, "group", "room", "link", "part", "end", "move", "turn", "orbit", "walk", "paint", "time", "hypothesis", "active",
     "theme", "clock", "check", "set",
   ]);
 
@@ -120,6 +127,7 @@
     const sets = new Map(); // name -> { name, line, members }
     const times = new Map(); // name -> { name, tok, line, value } — named time facts
     const goals = []; // ?- goal(...) — questions FOR THE RULES LAYER, data here
+    const events = []; // take/drop — possession changing hands on the timeline
     let theme = null; // { name, line }
     let view = null; // { name, line }
     let clock = null; // { start: minutes, minute: seconds-per-story-minute, line }
@@ -128,16 +136,154 @@
       .split("\n")
       .map((raw) => raw.replace(/\/\/.*$/, "").trim());
 
+    // Goals may span lines: a ?- line CONTINUES while its parens are
+    // unbalanced or it ends mid-conjunction (`,` `;` or an open paren).
+    // No continuation token — incompleteness is the signal. Joined here,
+    // before any pass sees the lines, so a continuation like `at(...)`
+    // can't be mistaken for a statement. Comments and blank lines are
+    // fine inside; errors report the ?- line.
+    {
+      const parenDebt = (s) => {
+        let n = 0;
+        for (const ch of s) {
+          if (ch === "(") n++;
+          else if (ch === ")") n--;
+        }
+        return n;
+      };
+      for (let i = 0; i < stripped.length; i++) {
+        if (!/^\?-/.test(stripped[i])) continue;
+        let text = stripped[i];
+        let j = i;
+        while ((parenDebt(text) > 0 || /[,;(]$/.test(text)) && j + 1 < stripped.length) {
+          j++;
+          if (!stripped[j]) continue; // blank (or comment-only) lines inside a goal are fine
+          text += " " + stripped[j];
+          stripped[j] = "";
+        }
+        stripped[i] = text;
+      }
+    }
+
+    // Pass 0 — HYPOTHESIS blocks: alternate worlds in one file. The base
+    // text is the shared world (evidence checks live there); each
+    // `hypothesis <name> … end` holds one variant routing; `active <name>`
+    // picks exactly one, and only that block compiles. One compile is
+    // still ONE determinate world — this is conditional compilation, not
+    // modality; the multiverse lives across compiles. Inactive blocks are
+    // checked for shape (their ends must match) and otherwise skipped.
+    const skip = new Array(stripped.length).fill(false);
+    const hypotheses = new Map(); // name -> { name, line, range }
+    let active = null;
+    {
+      const stack = []; // open blocks, for end-matching: { kind, name?, line, start }
+      stripped.forEach((line, i) => {
+        const lineNo = i + 1;
+        if (!line) return;
+        let m;
+        if ((m = line.match(/^hypothesis\s+([A-Za-z_][\w-]*)\s*$/))) {
+          skip[i] = true;
+          if (stack.some((b) => b.kind === "hypothesis")) {
+            errors.push({ line: lineNo, msg: "hypothesis blocks don't nest" });
+          }
+          if (RESERVED.has(m[1])) {
+            errors.push({ line: lineNo, msg: `"${m[1]}" is a reserved word — pick another hypothesis name` });
+          } else if (hypotheses.has(m[1])) {
+            errors.push({ line: lineNo, msg: `hypothesis "${m[1]}" is already defined on line ${hypotheses.get(m[1]).line}` });
+          } else {
+            hypotheses.set(m[1], { name: m[1], line: lineNo });
+          }
+          stack.push({ kind: "hypothesis", name: m[1], line: lineNo, start: i });
+          return;
+        }
+        if ((m = line.match(/^active\s+(.+?)\s*$/))) {
+          // active <name> <name>... — SELECT the world: the union of the
+          // named blocks compiles. Still one determinate world per
+          // compile; composition lets per-statement branches (slate_true,
+          // pine_false) assemble a theory without duplicating facts.
+          // Deliberately NO contradiction checking between blocks — the
+          // author composes; duplicate names and red checks police it.
+          skip[i] = true;
+          if (active) {
+            errors.push({ line: lineNo, msg: `active is already set (line ${active.line}) — one active line per scene` });
+          } else {
+            const names = splitArgs(m[1]);
+            const badTok = names.find((n) => !/^[A-Za-z_][\w-]*$/.test(n));
+            const dup = names.find((n, k) => names.indexOf(n) !== k);
+            if (badTok) {
+              errors.push({ line: lineNo, msg: `active: "${badTok}" isn't a hypothesis name` });
+            } else if (dup) {
+              errors.push({ line: lineNo, msg: `active names "${dup}" twice` });
+            } else {
+              active = { names, line: lineNo };
+            }
+          }
+          return;
+        }
+        if (/^part\b/.test(line)) {
+          if (stack.some((b) => b.kind === "hypothesis")) {
+            errors.push({ line: lineNo, msg: "part definitions don't belong inside a hypothesis — define parts at the top level" });
+          }
+          stack.push({ kind: "part", line: lineNo, start: i });
+          return;
+        }
+        if (/^at\b/.test(line) || /^set\s+[A-Za-z_][\w-]*\s*$/.test(line)) {
+          stack.push({ kind: "block", line: lineNo, start: i });
+          return;
+        }
+        if (line === "end") {
+          const top = stack.pop(); // a stray end reports in later passes
+          if (top && top.kind === "hypothesis") {
+            skip[i] = true;
+            const ref = hypotheses.get(top.name);
+            if (ref && !ref.range) ref.range = [top.start, i];
+          }
+        }
+      });
+      for (const b of stack) {
+        if (b.kind === "hypothesis") {
+          errors.push({ line: b.line, msg: `hypothesis "${b.name}" is missing its end` });
+        }
+      }
+      if (hypotheses.size && !active) {
+        errors.push({
+          line: [...hypotheses.values()][0].line,
+          msg: `${hypotheses.size} ${hypotheses.size === 1 ? "hypothesis" : "hypotheses"} declared — pick one or more: active <name>... (${[...hypotheses.keys()].join(", ")})`,
+        });
+      }
+      if (active && !hypotheses.size) {
+        errors.push({ line: active.line, msg: "active names a hypothesis, but none are declared" });
+      }
+      if (active && hypotheses.size) {
+        for (const n of active.names) {
+          if (!hypotheses.has(n)) {
+            errors.push({
+              line: active.line,
+              msg: `active: no hypothesis named "${n}" (declared: ${[...hypotheses.keys()].join(", ")})`,
+            });
+          }
+        }
+      }
+      const activeSet = new Set(active ? active.names : []);
+      for (const h of hypotheses.values()) {
+        if (!h.range) continue;
+        if (!activeSet.has(h.name)) {
+          for (let i = h.range[0]; i <= h.range[1]; i++) skip[i] = true; // the worlds not taken
+        }
+      }
+    }
+
     // Pass 1 — lift out part definitions (part <name> ... end) and the
     // clock. Both are collected before anything else parses, so statement
     // order stays meaningless (a move may use 5:15 before the clock line).
     const inPart = new Array(stripped.length).fill(false);
     let cur = null;
-    let atDepth = 0; // pass 1 only tells at-block ends from part ends
+    let blockDepth = 0; // pass 1 only tells at/set-block ends from part ends
     stripped.forEach((line, i) => {
+      if (skip[i]) return;
       const lineNo = i + 1;
-      if (!cur && /^at\b/.test(line)) {
-        atDepth++; // the block itself parses in pass 2
+      if (!cur && (/^at\b/.test(line) || /^set\s+[A-Za-z_][\w-]*\s*$/.test(line))) {
+        blockDepth++; // at-blocks and set-BLOCKS (bare `set name`) parse in pass 2
         return;
       }
       if (!cur && /^clock\b/.test(line)) {
@@ -196,13 +342,13 @@
           cur = { name: m[1], line: lineNo, body: [] };
         }
       } else if (line === "end") {
-        if (!cur && atDepth > 0) {
-          atDepth--; // closes an at-block; pass 2 handles it
+        if (!cur && blockDepth > 0) {
+          blockDepth--; // closes an at/set block; pass 2 handles it
           return;
         }
         inPart[i] = true;
         if (!cur) {
-          errors.push({ line: lineNo, msg: '"end" without a matching part or at block' });
+          errors.push({ line: lineNo, msg: '"end" without a matching part, at or set block' });
         } else if (!cur.body.length) {
           errors.push({ line: cur.line, msg: `part "${cur.name}" is empty` });
           cur = null;
@@ -245,9 +391,65 @@
 
     // Pass 2 — everything else
     let block = null; // open `at <time>` block: { t, line }
+    let setBlock = null; // open `set <name>` BLOCK: declarations enroll as members
     stripped.forEach((line, i) => {
-      if (inPart[i] || !line) return;
+      if (skip[i] || inPart[i] || !line) return;
       const lineNo = i + 1;
+
+      // set <name> ... end — the BLOCK form of set: every object
+      // declared inside becomes a member. Membership is single-sourced
+      // in where the declaration lives — no name list to drift out of
+      // sync when members are added, removed or renamed.
+      if (/^set\s+[A-Za-z_][\w-]*\s*$/.test(line)) {
+        const name = line.match(/^set\s+([A-Za-z_][\w-]*)/)[1];
+        if (setBlock || block) {
+          errors.push({ line: lineNo, msg: `blocks don't nest (block open since line ${(setBlock || block).line})` });
+          return;
+        }
+        if (RESERVED.has(name)) {
+          errors.push({ line: lineNo, msg: `"${name}" is a reserved word — pick another set name` });
+          return;
+        }
+        if (sets.has(name)) {
+          errors.push({ line: lineNo, msg: `set "${name}" is already defined on line ${sets.get(name).line}` });
+          return;
+        }
+        setBlock = { name, line: lineNo, members: [] };
+        return;
+      }
+      if (setBlock) {
+        if (line === "end") {
+          if (!setBlock.members.length) {
+            errors.push({ line: setBlock.line, msg: `set "${setBlock.name}" is empty` });
+          } else {
+            sets.set(setBlock.name, { name: setBlock.name, line: setBlock.line, members: setBlock.members });
+          }
+          setBlock = null;
+          return;
+        }
+        if (/^(move|turn|orbit|walk|paint|take|drop|at|check|set|theme|view|time|clock)\b/.test(line) || line.startsWith("?")) {
+          errors.push({
+            line: lineNo,
+            msg: `a set block encloses declarations — only objects belong inside (set "${setBlock.name}" open since line ${setBlock.line})`,
+          });
+          return;
+        }
+        parseStatement(line, lineNo, objects, errors, { parts, anims, timeCtx });
+        // enroll the declared name — always the statement's second token
+        // (shape/room/group/link/instance all read `<kind> <name> ...`)
+        const nm = (line.match(/^\S+\s+([A-Za-z_][\w-]*)/) || [])[1];
+        if (nm && objects.has(nm)) {
+          if (objects.get(nm).repeat) {
+            errors.push({
+              line: lineNo,
+              msg: `repeat inside a set block: the copies already form a set (the "${nm}" family)`,
+            });
+          } else {
+            setBlock.members.push(nm);
+          }
+        }
+        return;
+      }
 
       // at <time> ... end / at <t0> .. <t1> ... end — TIME BLOCKS.
       // The instant form scopes MOMENT facts, the range form DURATION
@@ -317,7 +519,7 @@
         parseQuery(line.slice(1), lineNo, queries, errors, timeCtx, false, blockAt);
       } else if (/^check\b/.test(line)) {
         parseQuery(line.slice(5), lineNo, queries, errors, timeCtx, true, blockAt);
-      } else if (block && !/^(move|turn|orbit|walk|paint)\b/.test(line)) {
+      } else if (block && !/^(move|turn|orbit|walk|paint|take|drop)\b/.test(line)) {
         // a time block scopes EVENTS; things that exist are declared outside
         errors.push({
           line: lineNo,
@@ -346,16 +548,17 @@
         }
       } else if (/^(move|turn|orbit|walk|paint)\b/.test(line)) {
         parseAnim(line, lineNo, anims, errors, timeCtx, blockAt);
+      } else if (/^(take|drop)\b/.test(line)) {
+        parsePossess(line, lineNo, events, errors, timeCtx, blockAt);
       } else if (/^theme\b/.test(line)) {
         const m = line.match(/^theme\s+([A-Za-z_][\w-]*)$/);
         if (!m) {
           errors.push({ line: lineNo, msg: "expected: theme <name>" });
-        } else if (!THEMES.has(m[1])) {
-          errors.push({
-            line: lineNo,
-            msg: `unknown theme "${m[1]}" (available: ${[...THEMES].join(", ")})`,
-          });
         } else if (theme) {
+          // NOTE: theme names are no longer validated here — custom
+          // themes live in the renderer's themes.json, so the renderer
+          // owns the list and warns about unknowns. The core just
+          // carries the name.
           errors.push({
             line: lineNo,
             msg: `theme is already "${theme.name}" (line ${theme.line}) — one theme per scene`,
@@ -387,6 +590,9 @@
     if (block) {
       errors.push({ line: block.line, msg: "at block is missing its end" });
     }
+    if (setBlock) {
+      errors.push({ line: setBlock.line, msg: `set "${setBlock.name}" block is missing its end` });
+    }
 
     // a time name that shadows an object or set would read ambiguously
     for (const tm of times.values()) {
@@ -400,11 +606,14 @@
     }
 
     return {
-      objects, queries, anims, errors, sets, goals,
+      objects, queries, anims, events, errors, sets, goals,
       theme: theme ? theme.name : null,
       view: view ? view.name : null,
       clock: clock ? { start: clock.start, minute: clock.minute } : null,
       times: new Map([...times].map(([k, v]) => [k, v.value])),
+      hypotheses: [...hypotheses.keys()],
+      active: active ? active.names : null,
+      parts: [...parts.keys()],
     };
   }
 
@@ -581,6 +790,50 @@
     anims.push(a);
   }
 
+  // take <holder> <thing> at(time) off(dx dy dz)? / drop <holder> <thing>
+  // at(time) — possession changing hands on the timeline. Instant events
+  // like appear/vanish, not segments: a hand closing isn't a smear.
+  // take teleports (the leap's logic — "she had it by 2:15" is honest
+  // testimony; walk the holder there first if you know the pickup);
+  // drop rests the thing on the ground at the holder's spot.
+  function parsePossess(line, lineNo, events, errors, timeCtx, blockAt) {
+    const err = (msg) => errors.push({ line: lineNo, msg });
+    const m = line.match(/^(take|drop)\s+([A-Za-z_][\w-]*)\s+([A-Za-z_][\w-]*)\s*(.*)$/);
+    if (!m) {
+      err("expected: take <holder> <thing> at(<time>)  /  drop <holder> <thing> at(<time>)");
+      return;
+    }
+    const [, kind, holder, thing, rest] = m;
+    const e = { kind, holder, thing, t: null, off: [0, 0, 0], line: lineNo };
+    let r = rest;
+    while (r.length) {
+      const pm = r.match(/^([A-Za-z_][\w-]*)\(([^)]*)\)\s*/);
+      if (!pm) return err(`can't read "${r}" — properties look like name(args)`);
+      const key = pm[1];
+      const args = splitArgs(pm[2]);
+      r = r.slice(pm[0].length);
+      if (key === "at") {
+        if (args.length !== 1) return err("at(): expected one time");
+        const w = wallTime(args[0], timeCtx, (msg) => err(`at(): ${msg}`));
+        if (Number.isNaN(w)) return;
+        const t = w !== null ? w : num(args[0]);
+        if (t === null || t < 0) return err("at(): expected a time >= 0 (seconds, a time name, or 2:30 with a clock)");
+        e.t = t;
+      } else if (key === "off" && kind === "take") {
+        const v = nums(args, 3);
+        if (!v) return err("off(): expected 3 numbers — where the thing rides on the holder");
+        e.off = v;
+      } else {
+        return err(`${kind} doesn't take ${key}() — just at(time)${kind === "take" ? " and off(dx dy dz)" : ""}`);
+      }
+    }
+    if (e.t === null && blockAt != null) e.t = blockAt.t0;
+    if (e.t === null) {
+      return err(`${kind} needs at(<time>) — the moment possession ${kind === "take" ? "begins" : "ends"}`);
+    }
+    events.push(e);
+  }
+
   // Parses the body of `? ...` queries and `check ...` assertions — the
   // same grammar: [quant] fn(args) [at(t) | during(t1 t2)].
   function parseQuery(body, lineNo, queries, errors, timeCtx, isCheck, blockAt) {
@@ -706,12 +959,12 @@
     const [, shape, name, rest] = stmt;
 
     const partDef = ctx && ctx.parts && ctx.parts.get(shape);
-    if (!SHAPES.has(shape) && shape !== "group" && shape !== "room" && shape !== "link" && !partDef) {
+    if (!SHAPES.has(shape) && shape !== "group" && shape !== "room" && shape !== "tube" && shape !== "link" && !partDef) {
       if (ctx && ctx.nestedFrom && ctx.nestedFrom.has(shape)) {
         err(`parts can't use other parts (yet) — "${shape}" must be spelled out here`);
         return;
       }
-      const known = [...SHAPES].join(", ") + ", group, room";
+      const known = [...SHAPES].join(", ") + ", group, room, tube";
       const partNames = ctx && ctx.parts && ctx.parts.size ? ", " + [...ctx.parts.keys()].join(", ") : "";
       err(`unknown shape "${shape}" (available: ${known}${partNames})`);
       return;
@@ -739,6 +992,10 @@
       makeRoom(name, props, lineNo, objects, err, timeCtx);
       return;
     }
+    if (shape === "tube") {
+      makeTube(name, props, lineNo, objects, err, timeCtx);
+      return;
+    }
     if (partDef) {
       makeInstance(partDef, name, props, lineNo, objects, ctx.anims, errors, ctx.parts, timeCtx);
       return;
@@ -757,6 +1014,7 @@
       parent: null, // group membership via in(name)
       repeat: null, spread: null, jitter: null, seed: null, stagger: null,
       between: null, // link only: the two endpoints it spans
+      heldBy: null, // possession via held-by(holder): pose derives from the holder
     };
 
     for (const p of props) {
@@ -777,6 +1035,10 @@
     }
     if (obj.shape === "link" && !obj.between) {
       err(`"${name}": a link needs between(a b) — the two things it spans`);
+      return;
+    }
+    if (obj.heldBy && (obj.at || obj.rel || obj.parent || (obj.rot[0] || obj.rot[1] || obj.rot[2]) || obj.shift)) {
+      err(`"${name}": held-by() derives position and rotation from the holder — drop at/relations/in/rotate/shift`);
       return;
     }
 
@@ -848,6 +1110,7 @@
             ? { ...o.at, dx: o.at.dx * s, dz: o.at.dz * s }
             : o.at.map((v) => v * s);
         }
+        if (o.heldBy) o.heldBy = { ...o.heldBy, off: o.heldBy.off.map((v) => v * s) };
         if (o.size) o.size = o.size.map((v) => v * s);
         if (o.r !== null) o.r *= s;
         if (o.h !== null) o.h *= s;
@@ -859,6 +1122,7 @@
           o.rel = { ...o.rel, gap: gap * s };
         }
         if (o.spread) o.spread = o.spread.map((v) => v * s);
+        if (o.shift) o.shift = o.shift.map((v) => v * s);
         if (o.jitter) o.jitter = o.jitter.map((v) => v * s);
         if (o.room) {
           o.room = {
@@ -880,6 +1144,9 @@
               ...(a.kind === "window" ? { height: a.height * s, sill: a.sill * s } : {}),
             })),
           };
+        }
+        if (o.tube) {
+          o.tube = { ...o.tube, r: o.tube.r * s, h: o.tube.h * s, thick: o.tube.thick * s };
         }
       }
       for (const a of bodyAnims) {
@@ -920,6 +1187,7 @@
       if (o.rel) contained(o, o.rel.kind, o.rel.target);
       if (o.rel && o.rel.target2) contained(o, o.rel.kind, o.rel.target2);
       if (o.at && o.at.ref) contained(o, "at", o.at.ref);
+      if (o.heldBy) contained(o, "held-by", o.heldBy.ref);
       if (o.between) for (const en of o.between) contained(o, "between", en);
       if (o.room) for (const a of o.room.autos) contained(o, "door(to ", a.target);
     }
@@ -936,6 +1204,7 @@
         name: mapping.get(o.name),
         parent: o.parent ? mapping.get(o.parent) : instName,
         at: o.at && o.at.ref ? { ...o.at, ref: mapping.get(o.at.ref) } : o.at,
+        heldBy: o.heldBy ? { ...o.heldBy, ref: mapping.get(o.heldBy.ref) } : null,
         rel: o.rel
           ? {
               ...o.rel,
@@ -995,8 +1264,11 @@
           break;
         }
         case "walls": {
+          // walls(0) = an OPEN room: no shells, just a ground pad — a
+          // yard, a field, a plaza. Query bounds come from the declared
+          // interior instead of the (absent) wall union.
           const v = nums(p.args, 1);
-          if (!v || v[0] <= 0) return err("walls(): expected one positive number (thickness)");
+          if (!v || v[0] < 0) return err("walls(): expected one number (thickness; 0 = open, no walls)");
           thick = v[0];
           break;
         }
@@ -1092,10 +1364,25 @@
     // into a room that declared no doors of its own — so rooms always
     // emit whole walls here and get their doorways cut in one pass later.
     const members = [];
-    for (const wl of roomWalls(size, thick)) {
-      members.push(
-        ...wallBoxes(name, wl, [{ lo: -wl.span / 2, hi: wl.span / 2, win: null }], size[1], thick, color, lineNo, group),
-      );
+    if (thick === 0) {
+      // open room: a flat pad instead of walls; doors/windows have no
+      // wall to live in
+      if (autos.length || Object.values(doors).some((d) => d.length) || Object.values(windows).some((w) => w.length)) {
+        return err(`"${name}" is an open room (walls(0)) — there are no walls for doors or windows`);
+      }
+      members.push({
+        name: `${name}-ground`, shape: "box", line: lineNo,
+        size: [size[0], 0.04, size[2]],
+        r: null, h: null, sides: null,
+        at: [0, 0.02, 0], rel: null, rot: [0, 0, 0], color,
+        appear: group.appear, vanish: group.vanish, parent: name,
+      });
+    } else {
+      for (const wl of roomWalls(size, thick)) {
+        members.push(
+          ...wallBoxes(name, wl, [{ lo: -wl.span / 2, hi: wl.span / 2, win: null }], size[1], thick, color, lineNo, group),
+        );
+      }
     }
 
     for (const m of members) {
@@ -1189,6 +1476,107 @@
     return boxes;
   }
 
+  // ------------------------------------------------------------------ tubes
+  //
+  // `tube` is the room recipe bent into a circle: a hollow cylinder — a
+  // well, a pipe, a chimney, a rabbit hole — desugared at parse time into
+  // a group of thin wall boxes standing in a faceted ring. Like a room,
+  // the hollowness is a FACT, not a look: segments block sight lines
+  // individually, the bore between them is genuinely open (you can see
+  // down a tube but not through it), and nothing downstream learns
+  // anything new. r() is the BORE radius; walls() extrude outward; the
+  // base sits at the group's origin, so a bare tube stands on the ground
+  // and at() places its base (the room convention — structure rests
+  // where you put it, it doesn't center-sink).
+
+  function makeTube(name, props, lineNo, objects, err, timeCtx) {
+    const group = {
+      name, shape: "group", line: lineNo,
+      size: null, r: null, h: null, sides: null,
+      at: null, rel: null, rot: [0, 0, 0], color: null,
+      appear: 0, vanish: null, parent: null,
+    };
+    let r = 0.5;
+    let h = 1;
+    let thick = 0.05;
+    let sides = 8;
+    let color = null;
+
+    for (const p of props) {
+      switch (p.key) {
+        case "r": {
+          const v = nums(p.args, 1);
+          if (!v || v[0] <= 0) return err("r(): expected one positive number — the bore radius");
+          r = v[0];
+          break;
+        }
+        case "h": {
+          const v = nums(p.args, 1);
+          if (!v || v[0] <= 0) return err("h(): expected one positive number");
+          h = v[0];
+          break;
+        }
+        case "walls": {
+          const v = nums(p.args, 1);
+          if (!v || v[0] <= 0) return err("walls(): expected one positive number — a tube IS its wall");
+          thick = v[0];
+          break;
+        }
+        case "sides": {
+          const v = nums(p.args, 1);
+          if (!v || !Number.isInteger(v[0]) || v[0] < 3 || v[0] > 64) {
+            return err("sides(): expected a whole number from 3 to 64");
+          }
+          sides = v[0];
+          break;
+        }
+        case "color": {
+          if (p.args.length !== 1) return err("color(): expected one color name or #hex");
+          color = p.args[0];
+          break;
+        }
+        default:
+          // at/rotate/in/appear/vanish/relations/repeat behave as on a group
+          if (!applyProp(group, p, err, timeCtx)) return;
+      }
+    }
+
+    if (group.at && group.rel) {
+      return err(`"${name}": use at() or a placement relation, not both`);
+    }
+    if (group.vanish !== null && group.vanish <= group.appear) {
+      return err(`"${name}": vanish(${group.vanish}) must come after appear(${group.appear})`);
+    }
+
+    // segment centers ring the mid-wall radius; width = the flat side of
+    // that polygon, so neighbours meet mid-wall (inner edges overlap a
+    // hair, outer edges gap a hair — the wall stays radially solid)
+    const R = r + thick / 2;
+    const w = 2 * R * Math.tan(Math.PI / sides);
+    const members = [];
+    for (let k = 0; k < sides; k++) {
+      const a = (k * 2 * Math.PI) / sides;
+      members.push({
+        name: `${name}-seg-${k + 1}`, shape: "box", line: lineNo,
+        size: [w, h, thick], r: null, h: null, sides: null,
+        at: [R * Math.sin(a), h / 2, R * Math.cos(a)],
+        rel: null, rot: [0, (k * 360) / sides, 0], color,
+        appear: group.appear, vanish: group.vanish, parent: name,
+        family: `${name}/seg`, // one palette slot; "/" keeps it out of implicit sets
+      });
+    }
+    for (const m of members) {
+      if (objects.has(m.name)) {
+        return err(
+          `tube "${name}" creates a segment named "${m.name}", but that name is taken (line ${objects.get(m.name).line})`,
+        );
+      }
+    }
+    group.tube = { r, h, thick, sides, color };
+    objects.set(name, group);
+    for (const m of members) objects.set(m.name, m);
+  }
+
   // ------------------------------------------------- shared doors (door-to)
   //
   // Runs after resolution, when room positions are known. Each door(to X)
@@ -1278,7 +1666,7 @@
             );
           } else {
             fail(
-              `${kind}(to): ${rm.name} and ${t.name} don't share a wall${nearest < Infinity ? ` — their nearest faces are ${nearest.toFixed(2)} apart` : ""}. Place rooms against each other with a relation, e.g. behind(${rm.name}) — room-to-room relations sit wall-to-wall`,
+              `${kind}(to): ${rm.name} and ${t.name} don't share a wall${nearest < Infinity ? ` — their nearest faces are ${nearest.toFixed(2)} apart` : ""}. Place rooms against each other with a relation, e.g. north-of(${rm.name}) — room-to-room relations sit wall-to-wall`,
             );
           }
           continue;
@@ -1370,7 +1758,7 @@
     }
     if (
       obj.shape === "link" &&
-      (["at", "rotate", "in", "size", "h", "repeat", "spread", "jitter", "stagger"].includes(key) ||
+      (["at", "rotate", "in", "size", "h", "repeat", "spread", "jitter", "stagger", "held-by"].includes(key) ||
         RELATIONS.has(key))
     ) {
       return bad("links derive their pose — they take between(a b), r(), sides(), color(), appear(), vanish()");
@@ -1421,8 +1809,9 @@
         return true;
       }
       case "at": {
-        // at(x y z), or at(name dx? dz?) — standing at a named thing's
-        // spot (its x/z; you rest on the ground at your own height)
+        // at(x y z) places the center; at(x z) places on the ground
+        // plane at that spot (rest height stays the object's own);
+        // at(name dx? dz?) — standing at a named thing's spot
         if (args.length >= 1 && num(args[0]) === null) {
           const off = args.length > 1 ? nums(args.slice(1), 2) : [0, 0];
           if (args.length !== 1 && !off) {
@@ -1431,12 +1820,28 @@
           obj.at = { ref: args[0], dx: off[0], dz: off[1] };
           return true;
         }
-        const v = nums(args, 3);
-        return v ? ((obj.at = v), true) : bad("expected at(x y z), or at(name dx? dz?)");
+        const v = nums(args, 3) || nums(args, 2);
+        return v ? ((obj.at = v), true) : bad("expected at(x y z), at(x z) to rest on the ground, or at(name dx? dz?)");
       }
       case "rotate": {
         const v = nums(args, 3);
         return v ? ((obj.rot = v), true) : bad("expected 3 numbers (degrees): rotate(x y z)");
+      }
+      case "held-by": {
+        // possession: this object's pose derives from its holder — same
+        // spot by default (concealed on the person; the geometry makes
+        // sees() honestly false while in() stays true), an offset shows
+        // it. The offset rides the holder's rotation like a pocket.
+        if (obj.shape === "group") {
+          return bad("groups can't be held — hold a plain shape (a box can be the package)");
+        }
+        if (args.length < 1 || num(args[0]) !== null) {
+          return bad("expected held-by(holder) or held-by(holder dx dy dz)");
+        }
+        const off = args.length > 1 ? nums(args.slice(1), 3) : [0, 0, 0];
+        if (!off) return bad("expected held-by(holder) or held-by(holder dx dy dz)");
+        obj.heldBy = { ref: args[0], off };
+        return true;
       }
       case "color": {
         if (args.length !== 1) return bad("expected one color name or #hex");
@@ -1484,7 +1889,19 @@
         obj.stagger = v[0];
         return true;
       }
+      case "shift": {
+        // a ground-plane nudge applied AFTER placement — composes with
+        // relations (which center on their target), at(name), on(), all
+        // of it. shift(0 -2): two north, no other change.
+        const v = nums(args, 2);
+        if (!v) return bad("shift(): expected dx dz — a slide applied after placement");
+        obj.shift = v;
+        return true;
+      }
       default: {
+        if (LEGACY_RELATIONS[key]) {
+          return bad(`${key}() is now ${LEGACY_RELATIONS[key]}() — placement relations use compass names (north = -z, up in view top)`);
+        }
         if (RELATIONS.has(key)) {
           if (obj.rel) return bad(`"${obj.name}" already has a placement relation`);
           if (args.length < 1 || args.length > 3) {
@@ -1807,6 +2224,38 @@
         return;
       }
 
+      if (o.heldBy) {
+        // held things keep their real dims but their pose derives from
+        // the holder at sample time (the holder may move; the held thing
+        // rides along) — validate the chain here, derive in poseAt
+        const hb = boundsOf(o);
+        o.dims = hb.dims;
+        o.bboxOff = hb.off;
+        o.pos = [0, 0, 0];
+        const t = objects.get(o.heldBy.ref);
+        if (!t) {
+          errors.push({ line: o.line, msg: `held-by(): no object named "${o.heldBy.ref}"` });
+        } else if (t.shape === "link") {
+          errors.push({ line: o.line, msg: `held-by(): "${t.name}" is a link — links can't hold things` });
+        } else if (t.name === o.name) {
+          errors.push({ line: o.line, msg: `held-by(): "${o.name}" can't hold itself` });
+        } else {
+          let cur = t, hops = 0;
+          while (cur && cur.heldBy && hops++ <= objects.size) {
+            if (cur.heldBy.ref === o.name) {
+              errors.push({
+                line: o.line,
+                msg: `held-by(): "${o.name}" and "${t.name}" hold each other — possession can't loop`,
+              });
+              break;
+            }
+            cur = objects.get(cur.heldBy.ref);
+          }
+        }
+        status.set(o.name, "done");
+        return;
+      }
+
       const b = boundsOf(o);
       const d = b.dims;
       const off = b.off;
@@ -1819,6 +2268,8 @@
           errors.push({ line: o.line, msg: `at(): no object named "${o.at.ref}"` });
         } else if (t.shape === "link") {
           errors.push({ line: o.line, msg: `at(): "${t.name}" is a link — links have no placed position` });
+        } else if (t.heldBy) {
+          errors.push({ line: o.line, msg: `at(): "${t.name}" is held by "${t.heldBy.ref}" — its position rides its holder; name the holder` });
         } else if ((t.parent || null) !== (o.parent || null)) {
           errors.push({
             line: o.line,
@@ -1826,11 +2277,17 @@
           });
         } else {
           resolve(t);
-          // the named thing's x/z; the default ground-rest y is kept
-          pos = [t.pos[0] + o.at.dx, pos[1], t.pos[2] + o.at.dz];
+          // the named thing's x/z — and rest on the named thing's BASE
+          // level, so at(upstairs_bedroom 1 0) stands on that floor,
+          // not the ground floor below it (base 0 for ground rooms:
+          // identical to the old ground-rest)
+          const tBase = t.pos[1] + (t.bboxOff ? t.bboxOff[1] : 0) - t.dims.h / 2;
+          pos = [t.pos[0] + o.at.dx, tBase + d.h / 2, t.pos[2] + o.at.dz];
         }
       } else if (o.at) {
-        pos = o.at.slice();
+        // at(x z): x/z only — keep the default rest y (h/2 for shapes,
+        // 0 for groups, so a room's base still lands on the ground)
+        pos = o.at.length === 2 ? [o.at[0], pos[1], o.at[1]] : o.at.slice();
       } else if (o.rel) {
         const anchor = (name) => {
           const t = objects.get(name);
@@ -1842,6 +2299,13 @@
             errors.push({
               line: o.line,
               msg: `${o.rel.kind}(): "${t.name}" is a link — links have no placed position to build on`,
+            });
+            return null;
+          }
+          if (t.heldBy) {
+            errors.push({
+              line: o.line,
+              msg: `${o.rel.kind}(): "${t.name}" is held by "${t.heldBy.ref}" — its position rides its holder; name the holder`,
             });
             return null;
           }
@@ -1859,7 +2323,7 @@
         const t2 = t && o.rel.target2 ? anchor(o.rel.target2) : null;
         if (t && (!o.rel.target2 || t2)) {
           // anchor box: one target's bounds, or the union of two —
-          // "left-of(command lab)" runs along both
+          // "west-of(command lab)" runs along both
           let td = t.dims;
           let tc = [t.pos[0] + t.bboxOff[0], t.pos[1] + t.bboxOff[1], t.pos[2] + t.bboxOff[2]];
           if (t2) {
@@ -1882,10 +2346,14 @@
             case "above":  c = [tc[0], tc[1] + td.h / 2 + gap + d.h / 2, tc[2]]; break;
             case "below":  c = [tc[0], tc[1] - td.h / 2 - gap - d.h / 2, tc[2]]; break;
             // Horizontal relations set x/z; the object rests on the ground.
-            case "left-of":     c = [tc[0] - td.w / 2 - gap - d.w / 2, d.h / 2, tc[2]]; break;
-            case "right-of":    c = [tc[0] + td.w / 2 + gap + d.w / 2, d.h / 2, tc[2]]; break;
-            case "in-front-of": c = [tc[0], d.h / 2, tc[2] + td.d / 2 + gap + d.d / 2]; break;
-            case "behind":      c = [tc[0], d.h / 2, tc[2] - td.d / 2 - gap - d.d / 2]; break;
+            // horizontal relations rest on the ANCHOR'S BASE level, not
+            // the ground — so a second-floor room placed south-of a
+            // second-floor room stays on the second floor. Ground
+            // anchors have base 0: identical to the old ground-rest.
+            case "west-of":     c = [tc[0] - td.w / 2 - gap - d.w / 2, tc[1] - td.h / 2 + d.h / 2, tc[2]]; break;
+            case "east-of":     c = [tc[0] + td.w / 2 + gap + d.w / 2, tc[1] - td.h / 2 + d.h / 2, tc[2]]; break;
+            case "south-of":    c = [tc[0], tc[1] - td.h / 2 + d.h / 2, tc[2] + td.d / 2 + gap + d.d / 2]; break;
+            case "north-of":    c = [tc[0], tc[1] - td.h / 2 + d.h / 2, tc[2] - td.d / 2 - gap - d.d / 2]; break;
           }
           pos = [c[0] - off[0], c[1] - off[1], c[2] - off[2]];
         }
@@ -1895,6 +2363,12 @@
       // with at() and relations alike
       if (o.offset) {
         pos = [pos[0] + o.offset[0], pos[1] + o.offset[1], pos[2] + o.offset[2]];
+      }
+      // shift(dx dz): the author's nudge, same composition — relations
+      // center on their target; shift slides along it (a hallway placed
+      // east-of a room but extending north, not jutting both ways)
+      if (o.shift) {
+        pos = [pos[0] + o.shift[0], pos[1], pos[2] + o.shift[1]];
       }
 
       o.dims = d;
@@ -1931,11 +2405,19 @@
         });
         continue;
       }
+      if (obj.heldBy && a.kind !== "paint") {
+        errors.push({
+          line: a.line,
+          msg: `${a.kind}: "${a.target}" is held by "${obj.heldBy.ref}" — move the holder and it rides along`,
+        });
+        continue;
+      }
       if (a.kind === "paint" && (obj.shape === "group" || obj.shape === "marker")) {
-        if (obj.room) {
-          // painting a ROOM paints its walls — the same surfaces its
-          // color() owns at birth (segments, sills and lintels included).
-          // Runs post-carve, so it lands on the real wall pieces.
+        if (obj.room || obj.tube) {
+          // painting a ROOM (or a tube) paints its walls — the same
+          // surfaces its color() owns at birth (segments, sills and
+          // lintels included). Runs post-carve, so it lands on the real
+          // wall pieces.
           for (const w of objects.values()) {
             if (w.parent !== obj.name || w.shape !== "box") continue;
             const wkey = w.name + "/paint";
@@ -1997,6 +2479,10 @@
             errors.push({ line: a.line, msg: `around(): no object named "${a.around.ref}"` });
             continue;
           }
+          if (c.heldBy) {
+            errors.push({ line: a.line, msg: `around(): "${c.name}" is held by "${c.heldBy.ref}" — its position rides its holder; name the holder` });
+            continue;
+          }
           if ((c.parent || null) !== (obj.parent || null)) {
             errors.push({
               line: a.line,
@@ -2038,6 +2524,10 @@
             errors.push({ line: a.line, msg: `to(): "${dest.name}" is a link — links have no placed position` });
             continue;
           }
+          if (dest.heldBy) {
+            errors.push({ line: a.line, msg: `to(): "${dest.name}" is held by "${dest.heldBy.ref}" — its position rides its holder; name the holder` });
+            continue;
+          }
           if ((dest.parent || null) !== (obj.parent || null)) {
             errors.push({
               line: a.line,
@@ -2063,6 +2553,10 @@
         }
         if (dest.shape === "link") {
           errors.push({ line: a.line, msg: `to(): "${dest.name}" is a link — links have no placed position` });
+          continue;
+        }
+        if (dest.heldBy) {
+          errors.push({ line: a.line, msg: `to(): "${dest.name}" is held by "${dest.heldBy.ref}" — its position rides its holder; name the holder` });
           continue;
         }
         if ((dest.parent || null) !== (obj.parent || null)) {
@@ -2095,6 +2589,109 @@
       if (o.vanish !== null && o.vanish > duration) duration = o.vanish;
     }
     return duration;
+  }
+
+  // take/drop events become per-thing POSSESSION TIMELINES: intervals of
+  // "held by whom" plus drop points. A held-by() declaration is the
+  // born-holding case (an open interval from birth); a take on a held
+  // thing is a hand-off; drop must name the current holder — a free
+  // consistency check on the transcription. Runs after buildTracks so
+  // it can refuse things that also animate themselves, and returns the
+  // timeline duration extended to cover the last event.
+  function buildPossession(objects, events, errors, duration) {
+    const byThing = new Map();
+    for (const e of events) {
+      const thing = objects.get(e.thing);
+      const holder = objects.get(e.holder);
+      if (!thing) { errors.push({ line: e.line, msg: `${e.kind}: no object named "${e.thing}"` }); continue; }
+      if (!holder) { errors.push({ line: e.line, msg: `${e.kind}: no object named "${e.holder}"` }); continue; }
+      if (thing.shape === "group" || thing.shape === "link" || thing.shape === "marker") {
+        errors.push({ line: e.line, msg: `${e.kind}: "${e.thing}" is a ${thing.shape} — only plain shapes can change hands` });
+        continue;
+      }
+      if (holder.shape === "link" || holder.shape === "marker") {
+        errors.push({ line: e.line, msg: `${e.kind}: "${e.holder}" is a ${holder.shape} — it can't hold things` });
+        continue;
+      }
+      if (e.holder === e.thing) { errors.push({ line: e.line, msg: `${e.kind}: "${e.thing}" can't hold itself` }); continue; }
+      if (!byThing.has(e.thing)) byThing.set(e.thing, []);
+      byThing.get(e.thing).push(e);
+      if (e.t > duration) duration = e.t;
+    }
+
+    for (const [name, evs] of byThing) {
+      const o = objects.get(name);
+      evs.sort((x, y) => x.t - y.t || x.line - y.line);
+      let bad = false;
+      for (let i = 1; i < evs.length; i++) {
+        if (evs[i].t === evs[i - 1].t) {
+          errors.push({ line: evs[i].line, msg: `two possession events for "${name}" at the same time — order them` });
+          bad = true;
+        }
+      }
+      // the position channel belongs to the object until possession first
+      // claims it: a clue may walk the token into a room (its placement),
+      // and a later take carries it from there — only movement scheduled
+      // AFTER the first event conflicts
+      const firstT = evs[0].t;
+      if (o.track) {
+        for (const chn of ["move", "turn"]) {
+          const lateSeg = o.track[chn].find((s) => s.t1 > firstT);
+          if (lateSeg) {
+            errors.push({
+              line: evs[0].line,
+              msg: `"${name}" still ${chn === "move" ? "moves" : "turns"} after its first take/drop (at ${firstT}) — its position belongs to possession from there on; finish its own animation earlier, or animate the holder`,
+            });
+            bad = true;
+          }
+        }
+      }
+      if (bad) continue;
+      const intervals = [];
+      const drops = [];
+      let cur = o.heldBy ? { t0: 0, holder: o.heldBy.ref, off: o.heldBy.off } : null;
+      for (const e of evs) {
+        if (e.kind === "take") {
+          if (cur) intervals.push({ ...cur, t1: e.t }); // hand-off
+          cur = { t0: e.t, holder: e.holder, off: e.off };
+        } else if (!cur || cur.holder !== e.holder) {
+          errors.push({
+            line: e.line,
+            msg: `drop: at that time "${name}" is held by ${cur ? `"${cur.holder}"` : "nobody"}, not "${e.holder}"`,
+          });
+        } else {
+          intervals.push({ ...cur, t1: e.t });
+          drops.push({ t: e.t, holder: e.holder, pos: null });
+          cur = null;
+        }
+      }
+      if (cur) intervals.push({ ...cur, t1: null });
+      o.possession = { intervals, drops };
+    }
+
+    // pure held-by things get the same timeline shape: one open interval
+    for (const o of objects.values()) {
+      if (o.heldBy && !o.possession) {
+        o.possession = { intervals: [{ t0: 0, t1: null, holder: o.heldBy.ref, off: o.heldBy.off }], drops: [] };
+      }
+    }
+    return duration;
+  }
+
+  // Drop points freeze where the holder stood: computed once per compile,
+  // in event order, so a chain (drop the purse, the letter inside stays
+  // with it) reads earlier drops' already-frozen positions.
+  function resolveDrops(compiled) {
+    const all = [];
+    for (const o of compiled.objects) {
+      if (o.possession) for (const d of o.possession.drops) all.push({ o, d });
+    }
+    all.sort((x, y) => x.d.t - y.d.t);
+    for (const { o, d } of all) {
+      const h = poseAt(compiled, d.t).get(d.holder);
+      if (!h) continue;
+      d.pos = [h.pos[0], o.dims.h / 2, h.pos[2]]; // dropped things land: ground-rest at the holder's spot
+    }
   }
 
   // Value of one channel at time t: base before the first segment,
@@ -2259,6 +2856,51 @@
       }),
     );
 
+    // possessed things derive from their possession timeline: placed
+    // normally before any take, riding the holder while held (offset
+    // rotated with the holder like a pocket), resting at the frozen
+    // drop point after a drop. Chains resolve holder-first (the letter
+    // in the purse in the hand); repeat's spread/jitter composes on top.
+    const heldDone = new Set();
+    function deriveHeld(name) {
+      if (heldDone.has(name)) return;
+      heldDone.add(name);
+      const o = byName.get(name);
+      const P = o.possession;
+      const iv = P.intervals.find((v) => t >= v.t0 && (v.t1 === null || t < v.t1));
+      const p = out.get(name);
+      const extra = o.offset || [0, 0, 0];
+      if (iv) {
+        const holder = byName.get(iv.holder);
+        if (!holder) return; // missing holder already errored at compile
+        if (holder.possession) deriveHeld(holder.name);
+        const h = out.get(holder.name);
+        const m = eulerToMat(h.rot);
+        const off = matVec(m, iv.off);
+        out.set(name, {
+          ...p,
+          pos: [h.pos[0] + off[0] + extra[0], h.pos[1] + off[1] + extra[1], h.pos[2] + off[2] + extra[2]],
+          rot: h.rot,
+          present: p.present && h.present,
+          // the full holder chain at this instant, nearest first — the
+          // carries() query reads it (the snake in the bag in the hand
+          // is carried by all three... well, by the bag and the hand)
+          carriedBy: [iv.holder, ...(h.carriedBy || [])],
+        });
+        return;
+      }
+      let last = null;
+      for (const d of P.drops) if (d.t <= t && d.pos) last = d;
+      if (last) {
+        out.set(name, {
+          ...p,
+          pos: [last.pos[0] + extra[0], last.pos[1] + extra[1], last.pos[2] + extra[2]],
+        });
+      }
+      // before the first take: the ordinary placed pose already in `out`
+    }
+    for (const o of compiled.objects) if (o.possession) deriveHeld(o.name);
+
     // links derive last, from their endpoints' posed world positions
     for (const o of compiled.objects) {
       if (o.shape !== "link") continue;
@@ -2393,7 +3035,16 @@
 
     // World bounds: shapes use their own box; a group is the union of its
     // present members' bounds (a point at its origin if it has none).
+    // An OPEN room (walls(0)) has no walls to union — its bounds are its
+    // declared interior at full height, so in(x yard) works on a pad.
     function boundsOf(o) {
+      if (o.room && o.room.thick === 0) {
+        const [w, h, d] = o.room.size;
+        return {
+          min: [o.pos[0] - w / 2, o.pos[1], o.pos[2] - d / 2],
+          max: [o.pos[0] + w / 2, o.pos[1] + h, o.pos[2] + d / 2],
+        };
+      }
       if (o.shape !== "group") return aabbOf(o);
       const min = [Infinity, Infinity, Infinity];
       const max = [-Infinity, -Infinity, -Infinity];
@@ -2489,6 +3140,9 @@
     if (a.present === false || b.present === false) return false;
     if (fn === "overlaps") return boxesOverlap(eng.boundsOf(a), eng.boundsOf(b));
     if (fn === "in") return centerInside(a, b, eng);
+    // carries(a b): a holds b at this instant, through any chain —
+    // possession data, not geometry (poseAt stamps the holder chain)
+    if (fn === "carries") return !!(b.carriedBy && b.carriedBy.includes(a.name));
     return !eng.anyBlocker(eng.centerOf(a), eng.centerOf(b), a, b);
   }
 
@@ -2612,6 +3266,10 @@
           result.value = boxesOverlap(boundsOf(a), boundsOf(b));
           result.text = `${label} → ${result.value}`;
           break;
+        case "carries":
+          result.value = !!(b.carriedBy && b.carriedBy.includes(a.name));
+          result.text = `${label} → ${result.value}`;
+          break;
         case "in":
           result.value = centerInside(a, b, { centerOf, boundsOf });
           result.text = `${label} → ${result.value}`;
@@ -2669,18 +3327,19 @@
     const byName = new Map(compiled.objects.map((o) => [o.name, o]));
     const rooms = compiled.objects.filter((o) => o.room);
     // movers: things whose whereabouts mean something — not rooms, not
-    // room structure (walls, markers), not frames or derived links
-    const partOfRoom = (o) => {
+    // structure (room walls, tube segments, markers), not frames or
+    // derived links
+    const partOfStructure = (o) => {
       for (let p = o.parent; p; ) {
         const po = byName.get(p);
         if (!po) return false;
-        if (po.room) return true;
+        if (po.room || po.tube) return true;
         p = po.parent;
       }
       return false;
     };
     const movers = compiled.objects.filter(
-      (o) => !o.room && o.shape !== "group" && o.shape !== "marker" && o.shape !== "link" && !partOfRoom(o),
+      (o) => !o.room && o.shape !== "group" && o.shape !== "marker" && o.shape !== "link" && !partOfStructure(o),
     );
 
     // sight facts are exported for SET MEMBERS only — the cast you've
@@ -2714,6 +3373,12 @@
               grid.add(clampD(s.t0));
               grid.add(clampD(s.t1));
             }
+          }
+        }
+        if (o.possession) {
+          for (const iv of o.possession.intervals) {
+            grid.add(clampD(iv.t0));
+            if (iv.t1 !== null) grid.add(clampD(iv.t1));
           }
         }
       }
@@ -2765,7 +3430,7 @@
     // order facts: where things ENDED UP — the horizon pose, so a
     // deduction-time timeline exports its SOLVED arrangement. Set
     // members only, like sight. left_of(a, b): a's center is west
-    // (-x) of b's, matching the left-of placement relation.
+    // (-x) of b's, matching the west-of placement relation.
     const leftOf = [];
     if (castAll.length >= 2) {
       const endMap = poseAt(compiled, D);
@@ -2774,6 +3439,18 @@
           if (a === b) continue;
           if (endMap.get(a.name).pos[0] < endMap.get(b.name).pos[0] - 1e-6) leftOf.push([a.name, b.name]);
         }
+      }
+    }
+
+    // possession is declared, not derived: held-by() and take/drop in
+    // the scene text ARE the facts — exported as who-held-what intervals
+    // (open holds close at the horizon, like whereabouts)
+    const has = [];
+    for (const o of compiled.objects) {
+      if (!o.possession) continue;
+      for (const iv of o.possession.intervals) {
+        if (!byName.has(iv.holder)) continue;
+        has.push([iv.holder, o.name, Math.min(iv.t0, D), iv.t1 === null ? D : Math.min(iv.t1, D)]);
       }
     }
 
@@ -2789,6 +3466,7 @@
       whereabouts,
       visible,
       leftOf,
+      has,
     };
   }
 
@@ -2824,6 +3502,9 @@
     }
     for (const [a, b] of f.leftOf || []) {
       lines.push(`left_of(${atom(a)}, ${atom(b)}).`); // end-of-timeline arrangement
+    }
+    for (const [holder, thing, t0, t1] of f.has || []) {
+      lines.push(`has(${atom(holder)}, ${atom(thing)}, ${t0}, ${t1}).`); // declared possession interval
     }
     return lines.join("\n") + "\n";
   }
@@ -2986,6 +3667,12 @@
             }
           }
         }
+        if (o.possession) {
+          for (const iv of o.possession.intervals) {
+            times.add(clampW(iv.t0));
+            if (iv.t1 !== null) times.add(clampW(iv.t1));
+          }
+        }
       }
       for (let i = 0; i <= SWEEP_STEPS; i++) times.add(w0 + ((w1 - w0) * i) / SWEEP_STEPS);
       const ts = [...times].sort((x, y) => x - y);
@@ -3062,14 +3749,14 @@
   // ------------------------------------------------------------------- API
 
   function compile(src) {
-    const { objects, queries, anims, errors, sets, goals, theme, view, clock, times } = parse(src);
+    const { objects, queries, anims, events, errors, sets, goals, theme, view, clock, times, hypotheses, active, parts } = parse(src);
     expandRepeats(objects, anims, queries, errors);
     resolveAll(objects, errors);
     const adjacency = carveDoors(objects, errors);
     // after the carve, so a link may span a doorway/window MARKER —
     // the Speckled Band's bell-rope hangs from a ventilator
     validateLinks(objects, errors);
-    const duration = buildTracks(objects, anims, errors);
+    const duration = buildPossession(objects, events, errors, buildTracks(objects, anims, errors));
 
     // named sets queries can quantify over: repeat families come free
     // (every family of copies is a set), explicit `set` statements on top
@@ -3093,7 +3780,8 @@
       setMap.set(s.name, s.members.slice());
     }
 
-    const compiled = { objects: [...objects.values()], queries, duration, errors, theme, view, clock, times, adjacency, goals, sets: setMap };
+    const compiled = { objects: [...objects.values()], queries, duration, errors, theme, view, clock, times, adjacency, goals, hypotheses, active, parts, sets: setMap };
+    resolveDrops(compiled); // freeze drop points before anything samples poses
     evalAdjacents(compiled, errors); // failed adjacency checks are compile errors
     evalTemporal(compiled, errors); // failed checks are compile errors
     compiled.facts = deriveFacts(compiled); // v3 groundwork: the world as ground facts
@@ -3102,7 +3790,7 @@
     return compiled;
   }
 
-  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.30.0" };
+  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.40.0" };
 
   if (typeof module !== "undefined" && module.exports) module.exports = Schauplatz;
   global.Schauplatz = Schauplatz;

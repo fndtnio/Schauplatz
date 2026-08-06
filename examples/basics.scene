@@ -3,12 +3,12 @@
 
 box crate    size(1.2 1.2 1.2) color(#8b5e3c)
 sphere ball  r(0.35) on(crate) color(tomato)
-cylinder can r(0.25) h(0.8) left-of(crate) color(seagreen)
+cylinder can r(0.25) h(0.8) west-of(crate) color(seagreen)
 
 box plank    size(2.4 0.1 0.6) above(crate 0.8) color(#d9c35b)
 sphere pea   r(0.15) on(plank) color(hotpink)
 
-box wall     size(4 2 0.2) behind(crate 1) color(#5b6575)
+box wall     size(4 2 0.2) north-of(crate 1) color(#5b6575)
 
 // queries are statements too — answers appear below the editor,
 // and sight lines are drawn in the view (green = clear, red = blocked)

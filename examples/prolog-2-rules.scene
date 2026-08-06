@@ -1,0 +1,79 @@
+// PROLOG TUTORIAL 2 — rules, negation, disjunction.
+//
+// Tutorial 1 asked questions against facts. This one is about the
+// three moves that turn facts into REASONING. Open rules.pl beside
+// this scene — every rule used here is a few lines you can read.
+//
+//   RULE:        head :- body.   "head is true IF the body is"
+//                with(A, B, TN) :- present_at(A, R, T), present_at(B, R, T), ...
+//                — a rule is a named conjunction with variables.
+//   NEGATION:    \+ goal   "goal CANNOT BE PROVEN". In general Prolog
+//                that's a shaky stand-in for false — but our facts
+//                derive exhaustively from geometry, so unprovable
+//                really does mean not-true-in-this-world.
+//   DISJUNCTION: (a ; b)   "a OR b" — Prolog tries a, then b.
+//
+// Everything here answers against ONE world — statement order never
+// matters. To experiment, EDIT the scene (walk bob to the shed, say)
+// and watch every answer recompute at once.
+
+view top
+theme clay
+time now 0
+
+room kitchen color(#c8a05a)
+room garden east-of(kitchen) color(#7fa06a)
+room shed east-of(garden) color(#8a7a5a)
+room unknown size(4 2.5 4) at(-6 0 -6) color(black)
+
+set people
+cylinder alice r(0.22) h(1.6) at(kitchen -1 0) color(#c8451f)
+cylinder bob r(0.24) h(1.7) at(kitchen 1 1) color(#3d7fa6)
+cylinder carol r(0.22) h(1.6) at(unknown 0 0) color(#7a5a8a)
+cylinder dana r(0.22) h(1.6) at(garden 0 -1) color(#1f7a6d)
+end
+
+// --- 1. NEGATION AS FAILURE --------------------------------------------
+// "Is bob NOT in the garden?" \+ succeeds because no fact places him
+// there — and absence is meaningful in a closed world.
+?- \+ present_at(bob, garden, 0)
+// Careful, the classic surprise: \+ with an UNBOUND variable asks "is
+// there NO X at all such that..." — bob IS somewhere, so this is no.
+// (It does NOT mean "list the rooms without bob".)
+?- \+ present_at(bob, X, 0)
+
+// --- 2. DISJUNCTION, and binding through it ----------------------------
+// "Alice is in the kitchen or the garden — which?" The binding that
+// survives tells you which branch was true.
+?- (R = kitchen ; R = garden), present_at(alice, R, 0)
+
+// --- 3. THE UNKNOWN ROOM: stated ignorance -----------------------------
+// carol is parked in `unknown` — the convention for "we can't place
+// her". The rules treat that room specially, and you can read it in
+// their source: with/3 refuses to call two things "together" there...
+?- present_at(carol, unknown, 0)
+?- with(carol, alice, now)
+// ...and could_be_at/3 reads unknown as "could be ANYWHERE" — compare:
+?- could_be_at(carol, shed, 0)
+?- could_be_at(alice, shed, 0)
+
+// --- 4. ANATOMY OF A REAL RULE: exactly_one ----------------------------
+// "EXACTLY one person in the room" — how do you say exactly, in logic?
+// A witness plus a DOUBLE NEGATION: "X is there, and there is no OTHER
+// Y also there." Read exactly_one/4 in rules.pl — it's five lines.
+// The kitchen fails it (alice AND bob), the garden passes (dana):
+?- exactly_one(people, kitchen, now, X)
+?- exactly_one(people, garden, now, X)
+
+// --- 5. put the moves together ------------------------------------------
+// "someone is alone in some room, and it isn't bob" — conjunction, a
+// rule, a negation, two variables binding at once. TWO answers come
+// back, and the first is a lesson in itself: carol is "alone" in the
+// UNKNOWN room — exactly_one doesn't special-case the staging room
+// (with/3 does; read both in rules.pl). Rules know only what their
+// source says. If that answer bothers you, the fix is a rule, not a
+// wish — try adding R \= unknown to the goal.
+?- exactly_one(people, R, now, X), \+ X = bob
+
+check in(alice kitchen) at(now)
+check in(dana garden) at(now)

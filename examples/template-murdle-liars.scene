@@ -1,0 +1,84 @@
+// MURDLE — starter template (later chapters: suspect statements,
+// the murderer always lies)
+//
+// Everything from the plain template, plus: each statement becomes a
+// PAIR of hypothesis blocks (its true-world and its false-world, each
+// carrying that branch's consequences), and the active line composes
+// your current theory — one _false, the rest _true. The testimony
+// certificate at the bottom confirms your liar is the only consistent
+// one. Solved = checks green, goals bound, testimony sole.
+theme paper
+view top
+time found 0
+
+room unknown size(8 2.5 5) at(-8 0 -8) color(black)
+
+set rooms
+room room_one color(green)
+room room_two west-of(room_one) color(coral)
+room room_three west-of(room_two) color(tan)
+end
+
+//victim: found in ___ — write it down before the clues
+cylinder body r(0.25) h(1.6) at(unknown 3.5 1.5) color(grey)
+turn body to(90 0 0) over(0)
+//walk body to(room_one) over(0)
+
+set suspects
+cylinder suspect_one r(0.25) h(1.6) at(unknown -3 -1) color(firebrick)
+cylinder suspect_two r(0.25) h(1.6) at(unknown -2 -1) color(steelblue)
+cylinder suspect_three r(0.25) h(1.6) at(unknown -1 -1) color(seagreen)
+end
+
+set weapons
+box weapon_one size(0.3 0.1 0.2) at(unknown -3 1) color(firebrick)
+box weapon_two size(0.3 0.1 0.2) at(unknown -2 1) color(steelblue)
+box weapon_three size(0.3 0.1 0.2) at(unknown -1 1) color(seagreen)
+end
+
+// ---- CLUES (the un-spoken ones) --------------------------------------
+// gates that can go red, or pair_up constraints — see template-murdle
+
+// ---- STATEMENTS ------------------------------------------------------
+// transcribe each statement's LITERAL content as a comment first —
+// what it claims about the world, not who it implicates. Then give it
+// a true-block and a false-block with that branch's consequences.
+
+hypothesis one_true
+// suspect_one: "..."  — what follows if this holds?
+end
+hypothesis one_false
+// the negation — what follows? (lies are informative)
+end
+
+hypothesis two_true
+end
+hypothesis two_false
+end
+
+hypothesis three_true
+end
+hypothesis three_false
+end
+
+// your theory: one liar, everyone else truthful. Swap and recompile —
+// each selection is one world; the checks kill the impossible ones.
+active one_true two_true three_true
+
+// ---- CERTIFICATES — green + bound = solved ---------------------------
+?- pair_up_scene(suspects, weapons, [], P)
+?- one_each(suspects, rooms, found)
+?- one_each(weapons, rooms, found)
+
+// the LIAR certificate — replace each claim with the statement's
+// literal content (present_at / \+ present_at over people, weapons,
+// rooms). set_member generates candidates; exactly the murderer's
+// claim must be false. Sole answer = your killer, derived.
+//?- set_member(suspects, Killer),
+//   testimony(Killer, suspect_one, present_at(suspect_one, room_one, 0)),
+//   testimony(Killer, suspect_two, \+ present_at(weapon_one, room_two, 0)),
+//   testimony(Killer, suspect_three, present_at(weapon_two, room_one, 0))
+
+// the full verdict adds geometry: the liar is AT the scene
+//?- where(body, found, R), exactly_one(suspects, R, found, Killer),
+//   exactly_one(weapons, R, found, Weapon)

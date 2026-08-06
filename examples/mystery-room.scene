@@ -9,7 +9,7 @@ theme noir  // one hard light, long shadows — the study at night
 box floor-mark size(0.4 0.02 0.4) at(2.5 0.01 1.5) color(crimson)
 
 box desk     size(2 0.8 1) at(-2 0.4 -1.5) color(#8b5e3c)
-box chair    size(0.5 0.9 0.5) in-front-of(desk) color(#6f4a2f)
+box chair    size(0.5 0.9 0.5) south-of(desk) color(#6f4a2f)
 
 box bookcase size(1.8 2.2 0.4) at(2 1.1 -2.2) color(#5b4a3a)
 box shelf    size(1.4 0.08 0.35) at(2 1.6 -1.8) color(#7a6a55)   // mounted on the bookcase front

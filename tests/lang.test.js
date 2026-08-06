@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { compile, sample } = require("../lang.js");
+const { compile, sample, prolog } = require("../lang.js");
 
 // Compile and assert no errors; returns objects keyed by name.
 function scene(src) {
@@ -30,6 +30,29 @@ test("defaults: box 1x1x1, sphere r 0.5, cylinder r 0.5 h 1, resting at origin",
 test("default placement rests on the ground: y is half the height", () => {
   const s = scene("box slab size(2 0.4 2)\nsphere orb r(0.75) at(2 0.75 0)");
   assert.deepEqual(s.slab.pos, [0, 0.2, 0]);
+});
+
+test("at(x z) rests on the ground at that spot; at(x y z) places the center", () => {
+  const s = scene("cylinder alice at(-3 0) h(0.5)\nsphere ball at(2 4)\nbox crate size(1 2 1) at(5 -1)");
+  assert.deepEqual(s.alice.pos, [-3, 0.25, 0]); // her own rest height, not center-sunk
+  assert.deepEqual(s.ball.pos, [2, 0.5, 4]);
+  assert.deepEqual(s.crate.pos, [5, 1, -1]);
+});
+
+test("at(x z) on rooms and tubes keeps the base on the ground (structure convention)", () => {
+  const s = scene("room cell size(2 2 2) at(4 6)\ntube well r(0.3) h(4) at(-4 0)");
+  assert.deepEqual(s.cell.pos, [4, 0, 6]); // group origin = base
+  const posed = sample(compile("tube well r(0.3) h(4) at(-4 0)"), 0).objects;
+  assert.equal(posed.find((o) => o.name === "well-seg-1").pos[1], 2); // still standing
+});
+
+test("at(x z) bakes through part scale()", () => {
+  const s = scene("part perch\n  box seat size(1 0.2 1) at(3 -2)\nend\nperch p scale(2)");
+  assert.deepEqual(s["p-seat"].pos, [6, 0.2, -4]); // x/z scaled, rest height from scaled size
+});
+
+test("at() arity errors teach both numeric forms", () => {
+  assert.match(errorsOf("box b at(1)")[0], /at\(x y z\), at\(x z\) to rest on the ground/);
 });
 
 test("commas and spaces both separate arguments", () => {
@@ -74,13 +97,62 @@ test("above()/below() use the gap (default 0.5)", () => {
   assert.deepEqual(s.down.pos, [0, 1.5, 0]);
 });
 
+test("walls(0): an open room — ground pad, interior bounds, no walls", () => {
+  const c = compile(
+    "room front_yard size(10 2.5 6) walls(0)\n" +
+      "cylinder visitor r(0.25) h(1.6) at(front_yard 2 1)\n" +
+      "box hedge size(1 1 1) at(front_yard -3 0)\n" +
+      "? in(visitor front_yard)\n" +
+      "? sees(visitor hedge)",
+  );
+  assert.deepEqual(c.errors, []);
+  const members = c.objects.filter((o) => o.parent === "front_yard");
+  assert.deepEqual(members.map((m) => m.name), ["front_yard-ground"]); // a pad, no walls
+  assert.equal(c.results[0].value, true); // in() works at person height
+  assert.equal(c.results[1].value, true); // nothing blocks across the yard
+  assert.match(errorsOf("room y walls(0) door(south)")[0], /open room .* no walls for doors/);
+  assert.match(errorsOf("room y walls(0) window(south)")[0], /open room .* no walls for doors/);
+});
+
+test("shift(dx dz): a nudge after placement — composes with relations", () => {
+  const c = compile(
+    "room study\n" +
+      "room hall east-of(study) size(1 2.5 8) shift(0 -2) door(to study)\n" +
+      "box crate on(hall) shift(0.5 0)",
+  );
+  assert.deepEqual(c.errors, []);
+  const h = c.objects.find((o) => o.name === "hall");
+  assertNear(h.pos, [2.9, 0, -2]); // centered by the relation, slid 2 north
+  assert.ok(c.adjacency.has("hall|study")); // the door still carves
+  assert.match(errorsOf("box b shift(1)")[0], /shift\(\): expected dx dz/);
+});
+
+test("horizontal relations rest on the anchor's base — floors propagate", () => {
+  const c = compile(
+    "room shaft size(1.6 2.5 1.6)\n" +
+      "room upper_hall above(shaft 0.4)\n" +
+      "room bedroom south-of(upper_hall) door(to upper_hall)\n" +
+      "cylinder kid r(0.2) h(1.3) at(bedroom 0 0)",
+  );
+  assert.deepEqual(c.errors, []);
+  assert.ok(Math.abs(c.objects.find((o) => o.name === "upper_hall").pos[1] - 2.9) < 1e-9);
+  assert.ok(Math.abs(c.objects.find((o) => o.name === "bedroom").pos[1] - 2.9) < 1e-9); // inherited the floor
+  assertNear(c.objects.find((o) => o.name === "kid").pos, [0, 3.55, 4.4]); // south (+z) of the hall, standing on floor 2
+  assert.ok(c.adjacency.has("bedroom|upper_hall")); // doors carve at elevation
+});
+
+test("legacy relation names error with the compass mapping", () => {
+  assert.match(errorsOf("box a\nbox b left-of(a)")[0], /left-of\(\) is now west-of\(\)/);
+  assert.match(errorsOf("box a\nbox b behind(a)")[0], /behind\(\) is now north-of\(\)/);
+});
+
 test("horizontal relations offset x/z and rest the object on the ground", () => {
   const s = scene(
     "box base size(2 4 2) at(0 2 0)\n" +
-      "sphere l r(0.5) left-of(base)\n" +
-      "sphere r r(0.5) right-of(base 1)\n" +
-      "sphere f r(0.5) in-front-of(base)\n" +
-      "sphere b r(0.5) behind(base)",
+      "sphere l r(0.5) west-of(base)\n" +
+      "sphere r r(0.5) east-of(base 1)\n" +
+      "sphere f r(0.5) south-of(base)\n" +
+      "sphere b r(0.5) north-of(base)",
   );
   assert.deepEqual(s.l.pos, [-1.75, 0.5, 0]); // 1 + 0.25 gap + 0.5
   assert.deepEqual(s.r.pos, [2.5, 0.5, 0]); // 1 + 1 gap + 0.5
@@ -332,6 +404,88 @@ test("time: plain seconds work without a clock; guard rails hold", () => {
   assert.match(errorsOf("clock 1:00\ntime t 2:00\ntime t 3:00")[0], /already defined/);
 });
 
+const HYP_SCENE = (act) =>
+  "clock 8:00 minute(0.2)\n" +
+  "room cabin size(4 2.5 4)\n" +
+  "room unknown size(4 2.5 4) at(-9 0 0)\n" +
+  "cylinder cooper r(0.25) h(1.6) at(cabin)\n" +
+  "hypothesis fbi_zone\n" +
+  "  time jump 8:13\n" +
+  "end\n" +
+  "hypothesis columbia\n" +
+  "  time jump 8:20\n" +
+  "  box raft size(1 0.3 0.5) at(unknown 1 1)\n" + // hypothesis-local object
+  "end\n" +
+  "active " + act + "\n" +
+  "walk cooper to(unknown) start(jump) over(0)\n" +
+  "check in(cooper cabin) at(8:05)";
+
+test("hypothesis blocks: only the active world compiles", () => {
+  const a = compile(HYP_SCENE("fbi_zone"));
+  assert.deepEqual(a.errors, []);
+  assert.equal(a.times.get("jump"), (13 * 60 * 0.2) / 60); // 8:13 under minute(0.2)
+  assert.ok(!a.objects.some((o) => o.name === "raft")); // columbia's raft doesn't exist here
+  const b = compile(HYP_SCENE("columbia"));
+  assert.deepEqual(b.errors, []);
+  assert.ok(b.objects.some((o) => o.name === "raft"));
+  assert.deepEqual(a.hypotheses, ["fbi_zone", "columbia"]);
+  assert.deepEqual(b.active, ["columbia"]);
+});
+
+test("multiple active hypotheses compose into one world", () => {
+  const c = compile(`box gavel size(0.3 0.1 0.2) at(5 0)
+cylinder pine at(0 0) h(1.8)
+cylinder oak at(3 0) h(1.8)
+hypothesis pine_false
+  walk pine to(8 0) over(0)
+end
+hypothesis oak_true
+  take oak gavel at(1)
+end
+hypothesis oak_false
+  take pine gavel at(1)
+end
+active pine_false oak_true`);
+  assert.deepEqual(c.errors, []);
+  const at = (t, n) => sample(c, t).objects.find((o) => o.name === n);
+  assert.equal(at(0.5, "pine").pos[0], 8); // pine_false's walk ran
+  assert.equal(at(2, "gavel").pos[0], 3); // oak_true's take ran
+  assert.deepEqual(c.facts.has.map((h) => h[0]), ["oak"]); // oak_false stayed dark
+  assert.deepEqual(c.active, ["pine_false", "oak_true"]);
+});
+
+test("multi-active guard rails: unknown and duplicated names", () => {
+  assert.match(errorsOf("hypothesis a\nend\nactive a zzz")[0], /no hypothesis named "zzz"/);
+  assert.ok(errorsOf("hypothesis a\nend\nactive a a").some((e) => /names "a" twice/.test(e)));
+});
+
+test("hypothesis blocks: guard rails", () => {
+  assert.match(errorsOf("hypothesis a\nend\nhypothesis b\nend")[0], /2 hypotheses declared — pick one/);
+  assert.match(errorsOf("hypothesis a\nend\nactive zzz")[0], /no hypothesis named "zzz"/);
+  assert.match(errorsOf("active a")[0], /none are declared/);
+  assert.match(errorsOf("hypothesis a\nbox x")[0], /missing its end/);
+  assert.match(errorsOf("hypothesis a\nhypothesis b\nend\nend\nactive a")[0], /don't nest/);
+  assert.match(errorsOf("hypothesis a\npart p\n box s\nend\nend\nactive a")[0], /define parts at the top level/);
+  assert.match(errorsOf("hypothesis a\nend\nhypothesis a\nend\nactive a")[0], /already defined/);
+});
+
+test("at(name): rests on the named thing's BASE level — stacked floors", () => {
+  const c = compile(
+    "room ground_room size(6 2.6 6)\n" +
+      "room upstairs size(6 2.6 6) at(0 2.8 0)\n" +
+      "box slab size(7 0.2 7) at(0 2.7 0)\n" +
+      "cylinder ground_guy r(0.25) h(1.6) at(ground_room 1 0)\n" +
+      "cylinder upstairs_gal r(0.25) h(1.6) at(upstairs 1 0)\n" +
+      "? sees(ground_guy upstairs_gal)\n" +
+      "? in(upstairs_gal upstairs)",
+  );
+  assert.deepEqual(c.errors, []);
+  assertNear(c.objects.find((o) => o.name === "ground_guy").pos, [1, 0.8, 0]); // unchanged on the ground
+  assertNear(c.objects.find((o) => o.name === "upstairs_gal").pos, [1, 3.6, 0]); // stands on floor 2
+  assert.equal(c.results[0].value, false); // the slab blocks vertical sight
+  assert.equal(c.results[1].value, true);
+});
+
 test("at block: statements inside get the block's instant", () => {
   const c = compile(
     "clock 1:00 minute(0.5)\n" +
@@ -388,7 +542,7 @@ test("at range block: guard rails", () => {
 test("at block: guard rails", () => {
   assert.match(errorsOf("at 2\nbox b\nend")[0], /declare objects outside/);
   assert.match(errorsOf("at 2\ncheck in(a b)")[0], /at block is missing its end/);
-  assert.match(errorsOf("box a\nend")[0], /"end" without a matching part or at block/);
+  assert.match(errorsOf("box a\nend")[0], /"end" without a matching part, at or set block/);
   assert.match(errorsOf("at 2\nat 3\nend\nend")[0], /at blocks don't nest/);
   assert.match(errorsOf("at 2:15\ncheck in(a b)\nend")[0], /wall-clock time/); // h:mm needs a clock
   // a part's own end still belongs to the part, even inside a block
@@ -718,7 +872,7 @@ test("orbit: a full turn returns home, and the next move chains from there", () 
 test("orbit: around(name) uses the target's placed position; height is kept", () => {
   const c = compile(
     "box hub size(1 1 1) at(0 0.5 0)\n" +
-      "sphere p r(0.2) right-of(hub 1)\n" + // p at (1.7, 0.2, 0)
+      "sphere p r(0.2) east-of(hub 1)\n" + // p at (1.7, 0.2, 0)
       "orbit p around(hub) by(180) over(2)",
   );
   assertNear(posAt(c, "p", 2), [-1.7, 0.2, 0]);
@@ -787,11 +941,12 @@ test("view: recorded in compiled output; rendering-only, like theme", () => {
   assert.match(errorsOf("view iso\nview top\nbox b")[0], /one view per scene/);
 });
 
-test("theme errors: unknown name, duplicate, malformed", () => {
-  assert.match(
-    errorsOf("theme vaporwave\nbox b")[0],
-    /unknown theme "vaporwave" \(available: ink, clay, blueprint, noir, paper, rts, snow\)/,
-  );
+test("theme: any name passes through — the renderer owns the list now", () => {
+  // custom themes live in themes.json, so the core carries names
+  // without judging them; the playground warns about unknowns
+  const c = compile("theme vaporwave\nbox b");
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.theme, "vaporwave");
   assert.match(errorsOf("theme ink\ntheme clay\nbox b")[0], /already "ink" \(line 1\)/);
   assert.match(errorsOf("theme\nbox b")[0], /expected: theme <name>/);
   assert.match(errorsOf("theme ink clay\nbox b")[0], /expected: theme <name>/);
@@ -853,7 +1008,7 @@ test("room: walls() thickness and color() flow into the generated walls", () => 
 });
 
 test("room: is a group — relation target from outside, moves as one", () => {
-  const s = scene("room k size(4 2 4)\nbox mat size(1 0.2 1) right-of(k)");
+  const s = scene("room k size(4 2 4)\nbox mat size(1 0.2 1) east-of(k)");
   assert.deepEqual(s.mat.pos, [2.95, 0.1, 0]); // 2.2 + 0.25 gap + 0.5
   const c = compile("room k size(4 2 4)\nmove k by(2 0 0) over(1)");
   assertNear(posAt(c, "k-west", 1), [-0.1, 1, 0]);
@@ -1236,7 +1391,7 @@ test("temporal errors: wrong query kind, unknown names", () => {
 test("rooms placed by relation sit wall-to-wall; door(to) needs no coordinates", () => {
   const c = compile(
     "room a size(4 2.5 4) door(to b)\n" +
-      "room b size(4 2.5 4) behind(a)\n" + // room-to-room: gap defaults to 0
+      "room b size(4 2.5 4) north-of(a)\n" + // room-to-room: gap defaults to 0
       "cylinder p r(0.25) h(1.6) at(0 0.8 0)\n" +
       "cylinder q r(0.25) h(1.6) at(0 0.8 -4.4)\n" +
       "? sees(p q)",
@@ -1249,10 +1404,10 @@ test("rooms placed by relation sit wall-to-wall; door(to) needs no coordinates",
 
 test("room placement: explicit gap still wins; non-rooms keep the 0.25 default", () => {
   assert.match(
-    errorsOf("room a size(4 2.5 4) door(to b)\nroom b size(4 2.5 4) behind(a 0.5)")[0],
+    errorsOf("room a size(4 2.5 4) door(to b)\nroom b size(4 2.5 4) north-of(a 0.5)")[0],
     /0\.50 apart.*wall-to-wall/,
   );
-  const s = scene("room a size(4 2.5 4)\nbox crate size(1 1 1) behind(a)");
+  const s = scene("room a size(4 2.5 4)\nbox crate size(1 1 1) north-of(a)");
   assertNear(s.crate.pos, [0, 0.5, -2.95]); // 2.2 + 0.25 + 0.5: default gap kept
 });
 
@@ -1262,10 +1417,10 @@ test("door(to): offset rooms connect on the wall that actually touches", () => {
   // is west, which center-direction guessing got wrong.
   const c = compile(
     "room command_module size(4 2.5 4) door(to lab_module 1.1) door(to garden_module) door(to airlock_module) door(to sleeping_module)\n" +
-      "room lab_module size(4 2.5 4) behind(command_module)\n" +
-      "room sleeping_module size(4 2.5 4) right-of(command_module) door(to airlock_module)\n" +
-      "room airlock_module size(8 2.5 4) in-front-of(sleeping_module)\n" +
-      "room garden_module size(4 2.5 9) left-of(lab_module) door(to lab_module)\n",
+      "room lab_module size(4 2.5 4) north-of(command_module)\n" +
+      "room sleeping_module size(4 2.5 4) east-of(command_module) door(to airlock_module)\n" +
+      "room airlock_module size(8 2.5 4) south-of(sleeping_module)\n" +
+      "room garden_module size(4 2.5 9) west-of(lab_module) door(to lab_module)\n",
   );
   assert.deepEqual(c.errors.map((e) => e.msg), []);
   // all six connections exist as doorway markers
@@ -1313,17 +1468,17 @@ test("pair relations: anchored to the union of two targets' bounds", () => {
   // single-target relation can center on the pair
   const s = scene(
     "room command size(4 2.5 4)\n" +
-      "room lab size(4 2.5 4) behind(command)\n" +
-      "room garden size(4 2.5 8.4) left-of(command lab)",
+      "room lab size(4 2.5 4) north-of(command)\n" +
+      "room garden size(4 2.5 8.4) west-of(command lab)",
   );
   assert.deepEqual(s.garden.pos, [-4.4, 0, -2.2]); // west of both, centered on their span
   // works for plain objects too, with the normal default gap
   const s2 = scene(
     "box a size(1 1 1) at(0 0.5 0)\nbox b size(1 1 1) at(0 0.5 4)\n" +
-      "box shelf size(0.5 0.5 5) right-of(a b)",
+      "box shelf size(0.5 0.5 5) east-of(a b)",
   );
   assert.deepEqual(s2.shelf.pos, [1, 0.25, 2]); // 0.5 + 0.25 gap + 0.25, centered z=2
-  assert.match(errorsOf("box a\nbox b\nbox c right-of(a b x)")[0], /gap must be a number/);
+  assert.match(errorsOf("box a\nbox b\nbox c east-of(a b x)")[0], /gap must be a number/);
 });
 
 // ------------------------------------------------------- clock, walk, doors
@@ -1428,7 +1583,7 @@ test("paint: guard rails", () => {
   assert.match(errorsOf("box a\npaint a to(red) from(blue)")[0], /chains from the previous color/);
   assert.match(errorsOf("box a\npaint a")[0], /paint needs to\(color\)/);
   assert.match(
-    errorsOf("room a size(4 2.5 4) door(to b)\nroom b size(4 2.5 4) behind(a)\npaint a-b-door to(red)")[0],
+    errorsOf("room a size(4 2.5 4) door(to b)\nroom b size(4 2.5 4) north-of(a)\npaint a-b-door to(red)")[0],
     /markers are invisible/,
   );
   // links CAN be painted: color isn't pose, and a link has a surface
@@ -1549,7 +1704,7 @@ test("doorway markers: shared and manual doors become named places", () => {
 const TWO_ROOMS =
   "clock 2:00 minute(0.5)\n" +
   "room hq size(4 2.5 4) door(to lab)\n" +
-  "room lab size(4 2.5 4) behind(hq)\n" +
+  "room lab size(4 2.5 4) north-of(hq)\n" +
   "cylinder carol r(0.25) h(1.6) at(hq)\n" +
   "walk carol to(hq-lab-door) start(2:10) over(2m)\n" +
   "walk carol to(lab) over(2m)\n"; // in the lab by 2:14
@@ -1567,7 +1722,7 @@ test("in(): room presence, instant and quantified, in wall time", () => {
 test("in(): strict — standing in the doorway is in neither room", () => {
   const c = compile(
     "room a size(4 2.5 4) door(to b)\n" +
-      "room b size(4 2.5 4) behind(a)\n" +
+      "room b size(4 2.5 4) north-of(a)\n" +
       "cylinder p r(0.25) h(1.6) at(0 0.8 -2.2)\n" + // dead center of the shared doorway
       "? in(p a)\n? in(p b)",
   );
@@ -1696,7 +1851,7 @@ test("link errors: the boundaries hold", () => {
 const CASE_FILE =
   "clock 2:00 minute(0.5)\n" +
   "room hq size(4 2.5 4) door(to lab)\n" +
-  "room lab size(4 2.5 4) behind(hq)\n" +
+  "room lab size(4 2.5 4) north-of(hq)\n" +
   "cylinder ann r(0.25) h(1.6) at(hq)\n" +
   "cylinder ben r(0.25) h(1.6) at(hq 1.2 0)\n" +
   "cylinder cat r(0.25) h(1.6) at(lab)\n" +
@@ -1779,7 +1934,7 @@ test("set: always stays pooled — a fact about the place, not a member", () => 
 test("set: repeat families are implicit sets — the stray-bolt debug", () => {
   const c = compile(
     "room bay size(4 2.5 4) door(to cabin)\n" +
-      "room cabin size(4 2.5 4) behind(bay)\n" +
+      "room cabin size(4 2.5 4) north-of(bay)\n" +
       "box bolt size(0.05 0.02 0.05) at(bay -1 0) repeat(3) spread(0.2 0 0)\n" +
       "move bolt-2 to(-0 0.5 -4.4) start(1) over(1)\n" + // one bolt strays
       "check never in(bolt cabin)\n" +
@@ -1793,7 +1948,7 @@ test("set: repeat families are implicit sets — the stray-bolt debug", () => {
 test("window: a y-band opening — sill and lintel stay, the band is open", () => {
   const c = compile(
     "room a size(4 2.8 4) window(to b 0.4 0.4 2.1)\n" +
-      "room b size(4 2.8 4) behind(a)\n" +
+      "room b size(4 2.8 4) north-of(a)\n" +
       "sphere low_eye r(0.05) at(a 0 1)\n" +
       "sphere low_tgt r(0.05) at(b 0 -1)\n" +
       "sphere high_eye r(0.05) at(0 2.3 1)\n" + // at band height, in a
@@ -1826,7 +1981,7 @@ test("window: manual form, defaults, and guard rails", () => {
     /openings overlap/,
   );
   assert.match(
-    errorsOf("room a size(4 2.5 4) window(to b 0.4 0.4 2.3)\nroom b size(4 2.5 4) behind(a)")[0],
+    errorsOf("room a size(4 2.5 4) window(to b 0.4 0.4 2.3)\nroom b size(4 2.5 4) north-of(a)")[0],
     /doesn't fit a 2.5-high wall/,
   );
 });
@@ -1834,8 +1989,8 @@ test("window: manual form, defaults, and guard rails", () => {
 test("adjacent: a static fact read off the door(to) graph", () => {
   const c = compile(
     "room a size(4 2.5 4) door(to b)\n" +
-      "room b size(4 2.5 4) behind(a) door(to c)\n" +
-      "room c size(4 2.5 4) behind(b)\n" +
+      "room b size(4 2.5 4) north-of(a) door(to c)\n" +
+      "room c size(4 2.5 4) north-of(b)\n" +
       "room lone size(4 2.5 4) at(20 0 0) door(south)\n" + // manual door: no adjacency fact
       "? adjacent(a b)\n" +
       "? adjacent(b a)\n" + // symmetric
@@ -1850,7 +2005,7 @@ test("adjacent: a static fact read off the door(to) graph", () => {
 });
 
 test("adjacent: failing checks are compile errors; time words rejected", () => {
-  const TWO = "room a size(4 2.5 4) door(to b)\nroom b size(4 2.5 4) behind(a)\nbox crate\n";
+  const TWO = "room a size(4 2.5 4) door(to b)\nroom b size(4 2.5 4) north-of(a)\nbox crate\n";
   assert.match(errorsOf(TWO + "check adjacent(a crate)")[0], /isn't a room/);
   const fail = compile(TWO + "room far size(4 2.5 4) at(30 0 0)\ncheck adjacent(a far)");
   assert.equal(fail.errors.length, 1);
@@ -1858,6 +2013,21 @@ test("adjacent: failing checks are compile errors; time words rejected", () => {
   assert.match(errorsOf(TWO + "? ever adjacent(a b)")[0], /takes no quantifier/);
   assert.match(errorsOf(TWO + "? adjacent(a b) at(3)")[0], /doesn't change over time/);
   assert.match(errorsOf(TWO + "check adjacent(a b) during(1 2)")[0], /doesn't change over time/);
+});
+
+test("goals: multiline — incompleteness continues the line", () => {
+  const c = compile(
+    "room field\n" +
+      "?- where(body, found, R),\n" +
+      "   exactly_one(suspects, R, found, Killer),\n" +
+      "\n" + // blank line inside is fine
+      "   testimony(Killer, earl_grey, present_at(x, field, 0))\n" +
+      "? in(body field)", // and the next statement is untouched
+  );
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.goals.length, 1);
+  assert.match(c.goals[0].goal, /^where.*testimony\(Killer, earl_grey.*0\)\)$/);
+  assert.equal(c.queries.length, 1);
 });
 
 test("goals: ?- lines are data for the rules layer, not queries", () => {
@@ -1883,7 +2053,7 @@ test("facts: the world derived as ground facts (v3 substrate)", () => {
     "clock 1:00 minute(0.5)\n" +
       "time time_of_death 3:00\n" +
       "room lion size(4 2.5 4) door(to aviary)\n" +
-      "room aviary size(4 2.5 4) behind(lion)\n" +
+      "room aviary size(4 2.5 4) north-of(lion)\n" +
       "room unknown size(4 2.5 4) at(-9 0 0)\n" +
       "cylinder eddie r(0.25) h(1.6) at(unknown)\n" +
       "cylinder carol r(0.25) h(1.6) at(aviary) appear(1:05)\n" +
@@ -1967,7 +2137,7 @@ test("facts: prolog text renders atoms safely and closes symmetry", () => {
   const { prolog } = require("../lang.js");
   const c = compile(
     "room lion_enclosure size(4 2.5 4) door(to monkey-island)\n" +
-      "room monkey-island size(4 2.5 4) behind(lion_enclosure)\n" +
+      "room monkey-island size(4 2.5 4) north-of(lion_enclosure)\n" +
       "cylinder bob r(0.25) h(1.6) at(lion_enclosure)",
   );
   const text = prolog(c);
@@ -1975,6 +2145,33 @@ test("facts: prolog text renders atoms safely and closes symmetry", () => {
   assert.match(text, /adjacent\(lion_enclosure, 'monkey-island'\)\./);
   assert.match(text, /adjacent\('monkey-island', lion_enclosure\)\./); // both directions
   assert.match(text, /in\(bob, lion_enclosure, 0, 0\)\./); // static scene: the t=0 instant
+});
+
+test("set block: declarations inside enroll — membership single-sourced", () => {
+  const c = compile(
+    "room unknown size(4 2.5 4) at(-9 0 0)\n" +
+      "set platforms\n" +
+      "  cylinder fewer_courses r(.4) h(.5) sides(5) at(unknown -1 1.5)\n" +
+      "  cylinder overturn r(.4) h(.5) sides(5) at(unknown -1 0)\n" +
+      "end\n" +
+      "set houses\n" + // rooms enroll too
+      "  room house_1 door(south)\n" +
+      "  room house_2 at(5 0 0) door(south)\n" +
+      "end\n" +
+      "? in(platforms unknown)",
+  );
+  assert.deepEqual(c.errors, []);
+  assert.deepEqual(c.sets.get("platforms"), ["fewer_courses", "overturn"]);
+  assert.deepEqual(c.sets.get("houses"), ["house_1", "house_2"]);
+  assert.match(c.results[0].text, /→ true \(fewer_courses, overturn\)/);
+});
+
+test("set block: guard rails", () => {
+  assert.match(errorsOf("set things\nend")[0], /set "things" is empty/);
+  assert.match(errorsOf("set things\nbox a")[0], /missing its end/);
+  assert.ok(errorsOf("set things\nwalk a to(1 1)\nend").some((m) => /encloses declarations/.test(m)));
+  assert.ok(errorsOf("set things\nbox a repeat(2)\nend").some((m) => /already form a set/.test(m)));
+  assert.match(errorsOf("set things a b\nbox a\nbox b\nset things\nbox c\nend")[0], /already defined/);
 });
 
 test("set errors: the guard rails", () => {
@@ -1987,6 +2184,337 @@ test("set errors: the guard rails", () => {
   assert.match(d.results[0].text, /distance can't take a set/);
   const e = compile("box a\nbox b\n? in(a b) except(a)");
   assert.match(e.results[0].text, /except\(\) needs a set/);
+});
+
+// ------------------------------------------------------------------- tubes
+
+test("tube desugars into a ring of segments, base resting at the origin", () => {
+  const s = scene("tube well r(0.3) h(4)");
+  assert.equal(s.well.shape, "group");
+  const segs = Object.values(s).filter((o) => o.name.startsWith("well-seg-"));
+  assert.equal(segs.length, 8); // default sides(8)
+  // base-anchored like a room: segment centers at h/2, so the tube
+  // stands on the ground — and at() places the BASE, not the center
+  const posed = sample(compile("tube well r(0.3) h(4)"), 0).objects;
+  assert.equal(posed.find((o) => o.name === "well-seg-1").pos[1], 2);
+  const sunk = sample(compile("tube well r(0.3) h(4) at(0 -4 0)"), 0).objects;
+  assert.equal(sunk.find((o) => o.name === "well-seg-1").pos[1], -2);
+});
+
+test("tube hollowness is a fact: bore open, wall solid, union bounds contain", () => {
+  const c = compile(`tube well r(0.3) h(4)
+sphere pebble r(0.1) at(0 0.5 0)
+sphere eye r(0.1) at(0 6 0)
+sphere side r(0.1) at(3 0.5 0)
+? sees(eye pebble)
+? sees(side pebble)
+? in(pebble well)`);
+  assert.deepEqual(c.errors, []);
+  const r = Object.fromEntries(sample(c, 0).results.map((x) => [x.text.split(" →")[0], x.text]));
+  assert.match(r["sees(eye, pebble)"], /true/); // straight down the bore
+  assert.match(r["sees(side, pebble)"], /false \(blocked by well-seg-/); // not through the wall
+  assert.match(r["in(pebble, well)"], /true/);
+});
+
+test("tube knobs: sides(), walls(), color(); segments share a palette family", () => {
+  const s = scene("tube pipe r(1) h(2) sides(12) walls(0.2) color(gray)");
+  const segs = Object.values(s).filter((o) => o.name.startsWith("pipe-seg-"));
+  assert.equal(segs.length, 12);
+  assert.equal(segs[0].color, "gray");
+  assert.equal(segs[0].family, "pipe/seg"); // "/" keeps it out of implicit sets
+  assert.ok(!compile("tube pipe r(1) h(2)").sets.has("pipe"));
+});
+
+test("tube composes: repeat clones the ring, parts bake scale", () => {
+  const rep = scene("tube post r(0.2) h(3) repeat(3) spread(2 0 0)");
+  assert.equal(Object.values(rep).filter((o) => o.shape === "group").length, 3);
+  assert.equal(Object.keys(rep).filter((n) => /^post-seg-\d+-\d$/.test(n)).length, 24);
+  const part = scene("part wellhead\n  tube shaft r(0.3) h(2)\nend\nwellhead big scale(2)");
+  assert.equal(part["big-shaft-seg-1"].size[1], 4); // h scaled
+  assert.equal(part["big-shaft"].tube.h, 4); // meta baked too
+});
+
+test("paint a tube paints its segments (like painting a room's walls)", () => {
+  const c = compile("tube well r(0.3) h(4) color(gray)\npaint well to(red) start(1)");
+  assert.deepEqual(c.errors, []);
+  const seg = sample(c, 2).objects.find((o) => o.name === "well-seg-1");
+  assert.equal(seg.color, "red");
+});
+
+test("tube segments are structure: excluded from whereabouts facts", () => {
+  const c = compile(`room cellar size(4 3 4)
+tube shaft r(0.3) h(3) at(0 0 0)
+sphere ball r(0.1) at(0 1 0)`);
+  const who = new Set(c.facts.whereabouts.map((w) => w.name));
+  assert.ok(who.has("ball"));
+  assert.ok(![...who].some((n) => n.includes("seg")));
+});
+
+test("tube errors: walls(0), bad sides, name collision", () => {
+  assert.match(errorsOf("tube a r(1) h(1) walls(0)")[0], /a tube IS its wall/);
+  assert.match(errorsOf("tube a r(1) h(1) sides(2)")[0], /3 to 64/);
+  assert.match(errorsOf("box c-seg-1\ntube c r(1) h(1)")[0], /name is taken/);
+});
+
+test("compiled.parts names defined parts (so the playground can hint)", () => {
+  const c = compile("part straw\n  box seg size(1 1 1)\nend");
+  assert.deepEqual(c.parts, ["straw"]);
+  assert.equal(c.objects.length, 0); // a part alone renders nothing
+  assert.deepEqual(c.errors, []);
+});
+
+// -------------------------------------------------------------- possession
+
+test("held-by: the held thing sits at its holder and rides every move", () => {
+  const c = compile(`cylinder slate at(2 0) h(1.8)
+box token size(0.2 0.2 0.2) held-by(slate)
+walk slate to(6 0) over(2)`);
+  assert.deepEqual(c.errors, []);
+  const at0 = sample(c, 0).objects.find((o) => o.name === "token");
+  assert.deepEqual(at0.pos, [2, 0.9, 0]); // concealed: the holder's center
+  const at2 = sample(c, 2).objects.find((o) => o.name === "token");
+  assert.deepEqual(at2.pos, [6, 0.9, 0]); // one walk, both went
+});
+
+test("held-by offset rides the holder's rotation like a pocket", () => {
+  const c = compile(`box guy size(1 2 1) rotate(0 90 0)
+box lamp size(0.2 0.2 0.2) held-by(guy 1 0 0)`);
+  const lamp = sample(c, 0).objects.find((o) => o.name === "lamp");
+  // +x offset, holder turned 90° about y → offset points down -z
+  assert.ok(Math.abs(lamp.pos[0] - 0) < 1e-9 && Math.abs(lamp.pos[2] - -1) < 1e-9);
+  assert.deepEqual(lamp.rot, [0, 90, 0]); // held inherits the holder's rotation
+});
+
+test("held-by chains: the letter in the purse in the hand", () => {
+  const c = compile(`cylinder slate at(0 0) h(1.8)
+box purse size(0.3 0.3 0.1) held-by(slate 0.5 0 0)
+box letter size(0.2 0.1 0.01) held-by(purse)
+walk slate to(4 0) over(1)`);
+  assert.deepEqual(c.errors, []);
+  const letter = sample(c, 1).objects.find((o) => o.name === "letter");
+  assert.deepEqual(letter.pos, [4.5, 0.9, 0]);
+});
+
+test("held things vanish with their holder", () => {
+  const c = compile(`box guy size(1 2 1) vanish(5)
+box coin size(0.1 0.1 0.1) held-by(guy)`);
+  assert.equal(sample(c, 4).objects.find((o) => o.name === "coin").present, true);
+  assert.equal(sample(c, 6).objects.find((o) => o.name === "coin").present, false);
+});
+
+test("concealment is geometry: a pocketed thing can't be seen, but is in the room", () => {
+  const c = compile(`room cell size(3 2.5 3)
+cylinder slate at(cell) h(1.8)
+box knife size(0.1 0.4 0.05) held-by(slate)
+sphere eye r(0.1) at(0 1.5 6)
+? sees(eye knife)
+? in(knife cell)`);
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.results.find((q) => q.text.includes("sees")).value, false); // the holder blocks
+  assert.equal(c.results.find((q) => q.text.includes("in(")).value, true);
+});
+
+test("held-by exports has/2 facts and whereabouts track the holder", () => {
+  const c = compile(`clock 1:00 minute(1)
+room a size(3 2 3) at(0 0 0)
+room b size(3 2 3) east-of(a 2)
+cylinder slate at(a) h(1.8)
+box token size(0.2 0.2 0.2) held-by(slate)
+walk slate to(b) over(2) start(1:01)`);
+  assert.deepEqual(c.errors, []);
+  assert.deepEqual(c.facts.has, [["slate", "token", 0, c.facts.duration]]);
+  assert.match(prolog(c), /has\(slate, token, 0, /);
+  const tokenRooms = c.facts.whereabouts.filter((w) => w.name === "token").map((w) => w.room);
+  assert.ok(tokenRooms.includes("a") && tokenRooms.includes("b")); // Cooper's money problem
+});
+
+test("held-by composes with parts: refs remap, offsets scale", () => {
+  const s = scene(`part porter
+  box body size(0.6 1.8 0.6)
+  box case size(0.4 0.3 0.2) held-by(body 0.5 0 0)
+end
+porter p scale(2)`);
+  assert.equal(s["p-case"].heldBy.ref, "p-body");
+  assert.deepEqual(s["p-case"].heldBy.off, [1, 0, 0]);
+});
+
+test("held things can be painted, but not moved", () => {
+  const ok = compile(`box guy size(1 2 1)
+box token size(0.2 0.2 0.2) color(gray) held-by(guy)
+paint token to(red) start(1)`);
+  assert.deepEqual(ok.errors, []);
+  assert.match(errorsOf("box guy size(1 2 1)\nbox t held-by(guy)\nmove t by(1 0 0)")[0],
+    /held by "guy" — move the holder/);
+});
+
+test("held-by errors: placement clash, missing/link/self/cycle holders, held targets", () => {
+  assert.match(errorsOf("box a\nbox t held-by(a) at(1 0)")[0], /derives position and rotation/);
+  assert.match(errorsOf("box t held-by(ghost)")[0], /no object named "ghost"/);
+  assert.match(errorsOf("box a\nbox b\nlink l between(a b)\nbox t held-by(l)")[0], /links can't hold/);
+  assert.match(errorsOf("box t held-by(t)")[0], /can't hold itself/);
+  assert.match(errorsOf("box a held-by(b)\nbox b held-by(a)")[0], /possession can't loop/);
+  assert.match(errorsOf("box a\nbox t held-by(a)\nbox c east-of(t)")[0], /rides its holder/);
+  assert.match(errorsOf("box a\nbox t held-by(a)\nbox w\nwalk w to(t) over(1)")[0], /rides its holder/);
+});
+
+// ------------------------------------------------------------- take / drop
+
+test("take teleports the thing to its holder; drop rests it where they stood", () => {
+  const c = compile(`cylinder slate at(0 0) h(1.8)
+box gavel size(0.3 0.1 0.2) at(5 0)
+walk slate to(4 0) over(2)
+take slate gavel at(3)
+drop slate gavel at(6)`);
+  assert.deepEqual(c.errors, []);
+  const at = (t, n) => sample(c, t).objects.find((o) => o.name === n);
+  assert.deepEqual(at(1, "gavel").pos, [5, 0.05, 0]); // placed, not yet taken
+  assert.deepEqual(at(4, "gavel").pos, [4, 0.9, 0]); // carried (walk ended at x=4)
+  assert.deepEqual(at(8, "gavel").pos, [4, 0.05, 0]); // dropped: ground-rest at slate's spot
+  assert.equal(c.duration, 6); // events extend the timeline
+});
+
+test("a second take is a hand-off; the scarf passes from pine to oak", () => {
+  const c = compile(`cylinder pine at(0 0) h(1.8)
+cylinder oak at(3 0) h(1.8)
+box scarf size(0.3 0.05 0.1) at(6 0)
+take pine scarf at(1)
+take oak scarf at(2)`);
+  assert.deepEqual(c.errors, []);
+  const at = (t) => sample(c, t).objects.find((o) => o.name === "scarf").pos[0];
+  assert.equal(at(1.5), 0);
+  assert.equal(at(3), 3);
+  assert.deepEqual(c.facts.has, [["pine", "scarf", 1, 2], ["oak", "scarf", 2, 2]]);
+});
+
+test("drop names the holder — and errors when they don't hold it", () => {
+  assert.match(errorsOf(`box a
+box thing size(0.2 0.2 0.2) at(3 0)
+drop a thing at(2)`)[0], /held by nobody, not "a"/);
+  assert.match(errorsOf(`box a
+box b at(1 0)
+box thing size(0.2 0.2 0.2) at(3 0)
+take a thing at(1)
+drop b thing at(2)`)[0], /held by "a", not "b"/);
+});
+
+test("a born-held thing can be dropped, and a dropped chain stays together", () => {
+  const c = compile(`cylinder slate at(0 0) h(1.8)
+box purse size(0.3 0.3 0.1) held-by(slate)
+box letter size(0.1 0.05 0.01) held-by(purse)
+walk slate to(4 0) over(2)
+drop slate purse at(3)`);
+  assert.deepEqual(c.errors, []);
+  const at = (t, n) => sample(c, t).objects.find((o) => o.name === n);
+  assert.deepEqual(at(5, "purse").pos, [4, 0.15, 0]); // dropped where slate stood
+  assert.deepEqual(at(5, "letter").pos.slice(0, 1), [4]); // still inside the purse
+});
+
+test("a clue may walk the token into place; the take carries it from there", () => {
+  const c = compile(`room chambers size(3 2.5 3) at(6 0 0)
+cylinder oak at(0 0) h(1.8)
+box motive size(0.3 0.1 0.2)
+walk motive to(chambers) over(0)
+take oak motive at(2)`);
+  assert.deepEqual(c.errors, []);
+  const at = (t) => sample(c, t).objects.find((o) => o.name === "motive").pos[0];
+  assert.equal(at(1), 6); // the walk placed it in the chambers
+  assert.equal(at(3), 0); // the take carried it to oak
+});
+
+test("taken things can't animate themselves AFTER the take; same-instant events collide", () => {
+  assert.match(errorsOf(`box a
+box thing size(0.2 0.2 0.2) at(3 0)
+take a thing at(1)
+move thing by(1 0 0) start(2)`)[0], /position belongs to possession from there on/);
+  assert.match(errorsOf(`box a
+box b at(1 0)
+box thing size(0.2 0.2 0.2) at(3 0)
+take a thing at(1)
+take b thing at(1)`)[0], /same time/);
+});
+
+test("take inside an at block inherits the block time; off() shows the carry", () => {
+  const c = compile(`clock 2:00 minute(1)
+cylinder slate at(0 0) h(1.8)
+box lamp size(0.2 0.2 0.2) at(3 0)
+at 2:05
+  take slate lamp off(0 1.2 0)
+end`);
+  assert.deepEqual(c.errors, []);
+  const lamp = (t) => sample(c, t).objects.find((o) => o.name === "lamp");
+  assert.deepEqual(lamp(2).pos, [3, 0.1, 0]); // before the block: on the ground
+  assert.deepEqual(lamp(8).pos, [0, 2.1, 0]); // carried high (0.9 + 1.2)
+});
+
+test("possession intervals join the temporal sweep: when in() flips at the take", () => {
+  const c = compile(`clock 1:00 minute(1)
+room a size(3 2 3) at(0 0 0)
+room b size(3 2 3) east-of(a 4)
+cylinder slate at(b) h(1.8)
+box knife size(0.1 0.3 0.05) at(a)
+walk slate to(a) over(2m) start(1:01)
+take slate knife at(1:03)
+walk slate to(b) over(2m) start(1:04)
+? when in(knife b)`);
+  assert.deepEqual(c.errors, []);
+  const q = c.queries.find((q2) => q2.temp);
+  // one range: the knife enters b mid-carry and stays to the horizon
+  assert.match(q.temp.text, /→ 1:05(:\d+)?–1:06$/);
+});
+
+// ------------------------------------------------------------ carries query
+
+test("carries: direct, chained, and honestly false", () => {
+  const c = compile(`cylinder slate at(0 0) h(1.8)
+cylinder taupe at(3 0) h(1.8)
+box bag size(0.3 0.3 0.1) held-by(slate)
+box snake size(0.4 0.1 0.1) held-by(bag)
+? carries(slate bag)
+? carries(slate snake)
+? carries(bag snake)
+? carries(taupe snake)`);
+  assert.deepEqual(c.errors, []);
+  assert.deepEqual(c.results.map((r) => r.value), [true, true, true, false]);
+});
+
+test("check never carries: the negative possession clue gates", () => {
+  const ok = compile(`cylinder taupe at(0 0) h(1.8)
+cylinder mauve at(3 0) h(1.8)
+box snake size(0.4 0.1 0.1) at(5 0)
+take mauve snake at(1)
+check never carries(taupe snake)`);
+  assert.deepEqual(ok.errors, []);
+  const bad = compile(`cylinder taupe at(0 0) h(1.8)
+box snake size(0.4 0.1 0.1) at(5 0)
+take taupe snake at(1)
+check never carries(taupe snake)`);
+  assert.match(bad.errors[0].msg, /never carries\(taupe, snake\) → false/);
+});
+
+test("carries composes with when and hand-offs", () => {
+  const c = compile(`cylinder pine at(0 0) h(1.8)
+cylinder oak at(3 0) h(1.8)
+box scales size(0.3 0.1 0.2) at(5 0)
+take pine scales at(1)
+take oak scales at(3)
+? when carries(pine scales)
+? when carries(oak scales)`);
+  assert.deepEqual(c.errors, []);
+  const texts = c.queries.filter((q) => q.temp).map((q) => q.temp.text);
+  assert.match(texts[0], /1\.00–3\.00/);
+  assert.match(texts[1], /3\.00–/);
+});
+
+test("carries takes set arguments and names the carrier", () => {
+  const c = compile(`cylinder pine at(0 0) h(1.8)
+cylinder oak at(3 0) h(1.8)
+set suspects pine oak
+box snake size(0.4 0.1 0.1) at(5 0)
+take oak snake at(1)
+? carries(suspects snake) at(2)`);
+  assert.deepEqual(c.errors, []);
+  const q = c.queries.find((q2) => q2.temp);
+  assert.match(q.temp.text, /true \(oak\)/);
 });
 
 // ----------------------------------------------- examples are fixtures too

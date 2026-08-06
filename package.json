@@ -5,6 +5,6 @@
   "description": "A tiny declarative language for describing and querying 3D scenes",
   "scripts": {
     "test": "node --test tests/",
-    "serve": "python3 -m http.server 8000"
+    "serve": "node serve.js"
   }
 }

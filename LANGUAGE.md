@@ -24,6 +24,7 @@ There are three statement forms:
 <shape> <name> <property>...                define an object
 group <name> <property>...                  define a group (a named frame)
 room <name> <property>...                   define a room (sugar: group + walls)
+tube <name> <property>...                   define a hollow cylinder (sugar: group + ring)
 link <name> between(a b) <property>...      a derived connector spanning two things
 part <name> ... end                         define a part (a reusable noun)
 <part> <name> <property>...                 instantiate a part
@@ -31,6 +32,8 @@ move <name> to(...)|by(...) <property>...   animate position over time
 walk <name> to(...)|by(...) <property>...   animate position on the ground plane
 turn <name> to(...)|by(...) <property>...   animate rotation (degrees)
 orbit <name> around(...) by(deg) <property>...   animate position in a circle
+take <holder> <thing> at(time) off(...)?    possession begins (an instant event)
+drop <holder> <thing> at(time)              possession ends — the thing lands there
 theme <name>                                whole-scene look (rendering only)
 view <name>                                 projection & vantage (rendering only)
 clock <h:mm> minute(seconds)?               wall-clock time for the timeline
@@ -57,9 +60,11 @@ Common properties (all optional):
 | property | meaning |
 |---|---|
 | `at(x y z)` | absolute position of the object's center |
+| `at(x z)` | ground-plane spot: rest on the ground there at your own height (rooms and tubes keep their base on the ground) — two numbers mean the ground plane, like `walk to(x z)` |
 | `at(name dx? dz?)` | standing at a named thing: its x/z (plus an optional slide), resting on the ground at your own height — `at(command_module)`, `at(desk1 1.2 0)` |
 | `color(name)` or `color(#hex)` | CSS color name or hex |
 | `rotate(x y z)` | rotation in degrees |
+| `held-by(holder dx? dy? dz?)` | possession: pose derives from the holder, riding all movement — see Possession |
 | `appear(t)` | the object does not exist before t seconds |
 | `vanish(t)` | the object stops existing at t seconds |
 
@@ -82,15 +87,26 @@ it's what later spatial reasoning builds on. An object has at most one of
 | `on(target)` | resting on top of target | — |
 | `above(target gap?)` | floating above target | 0.5 |
 | `below(target gap?)` | below target | 0.5 |
-| `left-of(target gap?)` | beside target (−x), resting on the ground | 0.25 |
-| `right-of(target gap?)` | beside target (+x), resting on the ground | 0.25 |
-| `in-front-of(target gap?)` | toward the default camera (+z), on the ground | 0.25 |
-| `behind(target gap?)` | away from the camera (−z), on the ground | 0.25 |
+| `west-of(target gap?)` | beside target (−x), resting on the ground | 0.25 |
+| `east-of(target gap?)` | beside target (+x), resting on the ground | 0.25 |
+| `south-of(target gap?)` | toward the default camera (+z), on the ground | 0.25 |
+| `north-of(target gap?)` | away from the camera (−z), on the ground | 0.25 |
 
-A relation may name **two** targets — `left-of(command_module lab_module)`
+A relation may name **two** targets — `west-of(command_module lab_module)`
 — anchoring to the union of their bounds: "left of those two" places you
 beside the pair, centered on their combined span. (This is how a long
-room runs along two neighbors.) A gap may follow: `left-of(a b 0.5)`.
+room runs along two neighbors.) A gap may follow: `west-of(a b 0.5)`.
+
+Horizontal relations rest on the **anchor's base level** — a room
+placed `south-of` a second-floor room stays on the second floor
+(ground anchors: plain ground-rest, as always). With `above()` to
+start a floor from its stair shaft, a whole storey lays out in compass
+relations with zero coordinates.
+
+Relations **center** on their target's cross-axis; `shift(dx dz)` slides
+after placement and composes with any of them (and with `at(name)` and
+`on()`): `east-of(study) shift(0 -2)` places a hallway beside the study
+but extending north instead of jutting both ways.
 
 Circular placements (`a on(b)`, `b on(a)`) are an error.
 
@@ -145,7 +161,7 @@ moves as one).
 | property | meaning | default |
 |---|---|---|
 | `size(w h d)` | the **interior**; walls extrude outward | `size(4 2.5 4)` |
-| `walls(t)` | wall thickness | `0.2` |
+| `walls(t)` | wall thickness; `walls(0)` = an **open room** — no walls, just a flat ground pad (a yard, a plaza); query bounds are the declared interior, so `in()` works at full height. No doors or windows (nothing to cut them into) | `0.2` |
 | `door(side width? offset?)` | a gap in a wall; side is `north/south/east/west`, offset slides it along the wall | width 1, centered |
 | `door(to room width?)` | a **shared** doorway: finds the facing walls, checks the rooms really touch, and carves one aligned opening into *both* rooms, centered on their shared stretch | width 1 |
 | `window(side width? height? sill? offset?)` | a **y-band** opening: wall stays below (the sill) and above (the lintel); sight, air — and small things — pass through the band | 0.8 × 0.8, sill 1, centered |
@@ -164,7 +180,7 @@ module" means adjacent. A whole floor plan is sides and connections:
 
 ```
 room command_module size(4 2.5 4) door(to lab_module 1.1)
-room lab_module size(4 2.5 4) behind(command_module)
+room lab_module size(4 2.5 4) north-of(command_module)
 ```
 
 The compass side is deliberately yours to state: a connection graph
@@ -195,7 +211,13 @@ manual doors (`-door-2`, … for more on one wall), `a-b-door` for a shared
 `walk`/`to()` targets but never blockers: `walk frida to(a-b-door)` then
 `walk frida to(b)` is a route with no coordinates. For cross-room
 movement, keep people at the top level (same frame as the rooms) and
-place them with `at(room)` / `at(room dx dz)` — membership via `in()` is
+place them with `at(room)` / `at(room dx dz)` — the object rests on the
+named thing's **base level**, so `at(upstairs_bedroom 1 0)` stands on
+that floor in a stacked, multi-story house (ground rooms: identical to
+plain ground-rest). Stacked floors want slab boxes between stories
+(there are no built-in floors, and without a slab `sees()` passes
+vertically) and stairwell rooms with `move` routes between levels —
+membership via `in()` is
 for things that should *ride along* when their group moves, not for
 people who walk between rooms. (Doorway markers can't be `at()` targets
 — they're born after placement resolves; use `at(room dx dz)`.)
@@ -204,6 +226,130 @@ Fine print: doorways are carved after placement resolves, so placement
 relations may target whole walls (`on(study-north)`) but not carved
 segments (`study-south-1` exists only for queries and animation). Rooms
 with doors can't `repeat()` yet.
+
+## Tubes
+
+```
+tube <name> r(bore) h(height) walls(t)? sides(n)? color()? ...
+```
+
+A **tube** is the room recipe bent into a circle: a hollow cylinder — a
+well, a pipe, a chimney, a rabbit hole. It desugars into a group of thin
+wall boxes standing in a faceted ring (`<name>-seg-1` … `-seg-n`), so
+its hollowness is a **fact, not a look**: the segments block sight lines
+individually and the bore between them is genuinely open. You can see
+*down* a tube but not *through* it; something inside is `in()` it; a
+sphere can `move` down the bore.
+
+`r()` is the **bore** (inner) radius, default 0.5. `h()` is the height,
+default 1. `walls(t)` is the wall thickness, extruded outward (default
+0.05; `walls(0)` is an error — a tube IS its wall, unlike a room, which
+degrades to an open pad). `sides(n)` sets the facet count, 3–64, default
+8 — the same faceted-prism look as a cylinder's `sides()`.
+
+Like a room — and unlike a plain shape — a tube is base-anchored: a bare
+tube stands on the ground, and `at(x y z)` places its **base**, not its
+center. `at(0 -4 0)` sinks a 4-high tube flush with the ground: a hole.
+Everything else is group behavior: relations can target it, `rotate()`
+lays it down (a tunnel), `repeat()` clones it (a colonnade), it works
+inside `part` bodies (`scale()` bakes r/h/walls), `paint` recolors its
+segments like a room's walls, and unset `color()` gives all segments one
+shared palette slot.
+
+Fine print: query bounds are the union of the segment boxes, so `in(x
+tube)` is true anywhere in that ring-shaped box — including inside the
+wall — not strictly the bore. Segments are structure: like room walls
+they are excluded from the whereabouts fact export (a tube is a place
+things pass through, not a thing with a location; a solid `cylinder` is
+still the right shape for a hand-held pipe that rules must track).
+
+## Possession
+
+`held-by(<holder> dx? dy? dz?)` declares that a thing is carried (or
+contained): its position and rotation derive from the holder for its
+whole life. One fact, and every movement composes — walk the person,
+the pocket contents go too:
+
+```
+cylinder slate at(2 0) h(1.8)
+box ticket size(0.2 0.1 0.01) held-by(slate)
+walk slate to(6 0) over(2)          // the ticket rides along
+```
+
+The default offset is `(0 0 0)`: the held thing sits at the holder's
+center — **concealed on the person**, which is what possession usually
+means in a mystery. The concealment is honest geometry, not a special
+rule: `sees(witness ticket)` is false because the holder's own body
+blocks the sight line, while `in(ticket room)` stays true because the
+ticket really is in the room. Give an offset to show the thing
+(`held-by(slate 0.4 0 0)` — a lantern in hand); the offset rotates with
+the holder like a pocket. In the playground, hovering an object lists
+what it holds.
+
+Holders can be anything placed (a person, a box, a group, a room —
+"the safe holds the will"). Held things must be plain shapes, and they
+chain: `purse held-by(slate)`, `letter held-by(purse)` — the letter
+crosses town in the purse in the hand. Cycles are a compile error.
+
+A held thing cannot be independently placed or animated — `at()`,
+relations, `in()`, `rotate()`, `move`/`walk`/`turn`/`orbit` on it are
+errors (move the holder). `paint` still works (color isn't pose), and
+`appear`/`vanish` still work (a possession can be revealed
+mid-timeline); a held thing is absent whenever its holder is. Held
+things can't anchor others: they are not valid targets for relations,
+`at(name)`, `to(name)`, or `around(name)` — name the holder instead.
+
+### take / drop — possession changing hands
+
+```
+take <holder> <thing> at(<time>) off(dx dy dz)?
+drop <holder> <thing> at(<time>)
+```
+
+Instant events, like `appear`/`vanish` — not segments (a hand closing
+isn't a smear). A thing placed normally sits where it was put until its
+first `take`; while held it rides the holder exactly as `held-by`
+things do; `drop` rests it on the ground at the holder's spot at that
+instant, where it stays. A second `take` is a hand-off (the scarf
+passes from Pine to Oak — no intervening drop needed). A born-held
+thing (`held-by`) can be dropped and re-taken; `take` works inside
+`at <time> … end` blocks (inheriting the block time) and inside
+hypothesis blocks — which is the point: the base scene declares
+everyone and everything once, and a theory is one line:
+
+```
+hypothesis oak_did_it
+  take ex_chancellor_oak gavel at(found)
+end
+```
+
+`take` **teleports** — no proximity required. This is the leap's
+logic: "she had it by 2:15" is testimony-shaped, honest about the
+unmodeled pickup; walk the holder to the thing first when you know the
+route. `drop` deliberately names the holder: `drop slate gavel` is a
+compile error if Slate doesn't hold it at that time — a free
+consistency check on your transcription.
+
+A thing named in `take`/`drop` owns its position channel only **until
+its first event**: a clue may walk the token into a room (that's its
+placement — the leap idiom), and a later `take` carries it from
+wherever it ended up. Movement scheduled *after* the first take/drop
+is an error — from there on the position belongs to possession
+(carried → dropped). Two possession events for one thing at the same
+instant are an error.
+
+Possession is a fact, and it exports as intervals:
+`has(holder, thing, t0, t1).` — who held what, when. rules.pl offers
+`has(A, B)` (ever held), `has_at(A, B, T)` (held at a moment — "who
+had the knife at time_of_death" is one goal), `carries`/`carries_at`
+(transitive: a clue like "whoever has the bag of cash knew they could
+get away" is `knew_get_away held-by(bag_cash)` — weld the label to the
+bag, and `carries_at(X, knew_get_away, T)` names whoever took the bag;
+the clue becomes true by construction), and
+`pair_up_scene(SetA, SetB, Cs, Pairs)`, which seeds the pairing search
+from declared possessions so goals carry only the still-open clues.
+Whereabouts intervals of held things follow their holder through every
+room ("the money was wherever Cooper was").
 
 ## Repeat
 
@@ -436,6 +582,48 @@ alone, and statement order still means nothing — inside the block or
 between blocks. Block times take h:mm, seconds, or a time name
 (`at time_of_death`).
 
+### hypotheses
+
+`hypothesis <name> … end` blocks hold **alternate theories** of one
+scene; `active <name> <name>...` selects one or more, and the union of
+the selected blocks compiles. The base text is the shared world;
+statements outside the blocks — especially checks — are the evidence
+*every* theory must survive. One compile is still one determinate
+world: this is conditional compilation, not modality; the multiverse
+lives across compiles.
+
+```
+hypothesis fbi_zone
+  time jump 8:13
+end
+hypothesis over_the_columbia
+  time jump 8:20
+  box raft size(1 0.3 0.5) at(river_bank 1 0)   // exists only in THIS world
+end
+active fbi_zone
+
+walk cooper to(unknown) start(jump) over(0)      // base text uses the knob
+check in(cooper cabin) at(8:05)                  // evidence: outside, shared
+```
+
+A hypothesis may declare objects (they exist only when it's active —
+don't reference them from base text, or the other worlds break), set
+time facts (the classic knob), and contain any ordinary statements
+including at-blocks. Blocks don't nest, `part` definitions stay at the
+top level, and `active` is always explicit — declared hypotheses with
+no `active` is an error that lists your options. To compare theories,
+swap `active` and recompile: which checks die *is* the analysis.
+
+Selecting **several** blocks turns hypotheses into composable
+*branch-facts*. The natural factoring for liar puzzles: one block per
+statement-branch (`slate_true`, `slate_false`, each carrying that
+branch's geometric consequences), and a full theory is a selection —
+`active slate_true pine_false oak_true`. n pairs of blocks instead of
+2ⁿ theories, no duplicated facts. The language does **no**
+contradiction checking between selected blocks (deliberate):
+composing a consistent world is the author's job, and the usual police
+apply — duplicate names collide, impossible worlds fail their checks.
+
 ### clock
 
 `clock 4:45 minute(0.5)` declares that the timeline starts at 4:45 and
@@ -498,6 +686,18 @@ theme ink
 | `rts` | dark terrain, player-color palette, selection rings under every object — game map |
 | `snow` | white snowfield, overcast winter light, blue-grey shadows, woolen palette — the Orient Express look |
 
+**Custom themes** live in `themes.json` beside the playground — pure
+data, no code. Each entry is usable as `theme <name>`; missing fields
+inherit from the default theme; entries may override built-ins. Colors
+are `"#hex"` strings; `material.kind` is `standard|toon|lambert|basic`
+(standard takes `roughness`/`metalness`; any kind takes
+`transparent`/`opacity`/`depthWrite`); optional extras: `ground` (an
+opaque lit floor), `rim` light, `shadowColor`, `outline`+`outlineColor`,
+`edges`, `ring`. A theme is a JSON object — share it by sharing the
+object. See the bundled `synthwave` for a worked example. Because the
+theme list now lives with the renderer, the core accepts *any* theme
+name; the playground warns (amber) when a name matches nothing loaded.
+
 At most one `theme` statement per scene; omitted means the renderer's
 default look. Themes bundle background, ground, lighting, materials, and
 the fallback palette for uncolored objects — explicit `color()` always
@@ -533,9 +733,19 @@ Answers appear in the output panel under the editor.
                     ("nothing" if the line is clear)
 ? in(a b)           is a's center strictly inside b's bounds? the room-
                     presence question: ? in(carol lab_module)
+? carries(a b)      does a hold b right now — directly or through a
+                    chain (the snake in the bag in the hand)? reads the
+                    possession timeline, not geometry
 ? adjacent(a b)     do the two ROOMS share a declared door? read off the
                     door(to) graph — a static fact about the floor plan
 ```
+
+`carries` is the possession clue's check form: "Taupe was chased by
+the person with the snake" means Taupe never had it —
+`check never carries(taupe snake)` gates it (red the moment any take
+says otherwise). Set arguments work and name the carrier
+(`? carries(suspects snake) → true (oak)`), and `when carries(pine
+scales)` is the chain of custody as ranges.
 
 `adjacent` is the odd one out: it never changes, so it takes no
 quantifier, `at()` or `during()` — but `check adjacent(a b)` works bare,
@@ -587,9 +797,26 @@ or a list of ranges.
 set suspects alice bob carol eddie
 ```
 
-A set is **not** a group: no frame, no geometry, pure membership. Its
-name can stand in one argument of a true/false query, meaning "some
-member" — and the temporal quantifiers do the rest:
+A set is **not** a group: no frame, no geometry, pure membership. The
+**block form** declares and enrolls in one motion — membership is
+single-sourced in where the declaration lives, so adding, removing or
+renaming a member is one edit with no name list to drift out of sync:
+
+```
+set weapons
+  box coffee_thermos size(0.3 0.1 0.2) at(unknown .5 -1.8)
+  box cookie size(0.3 0.1 0.2) at(unknown 0 -1.8)
+end
+```
+
+Only declarations belong inside (objects, rooms, groups, links —
+animations and queries are errors there); blocks don't nest; `repeat()`
+inside is refused (the copies already form a set — the family). The
+inline form remains for enrolling already-declared names; a given set
+is declared once, either way.
+
+A set's name can stand in one argument of a true/false query, meaning
+"some member" — and the temporal quantifiers do the rest:
 
 ```
 ? in(suspects lab_module)                       is SOMEONE there? (names every member who is)
@@ -700,7 +927,10 @@ like *murderer* or *alibi* belong to whatever consumes the facts.
 consults Tau Prolog with the scene's fact export plus `rules.pl`, and
 the answers appear under the query results (purple — derived, not
 stated). The goal's vocabulary belongs to the rules file, not to the
-language; the core just carries it.
+language; the core just carries it. Goals may span lines — a `?-` line
+continues while its parens are unbalanced or it ends mid-conjunction
+(`,` `;` or an open paren); no continuation token, incompleteness is
+the signal. Blank lines and comments are fine inside.
 
 ```
 set suspects carol eddie bob
@@ -721,20 +951,49 @@ case file — the eliminations, the candidates, the verdict:
 ?- sole(suspects, X, hut, time_of_death)             → X = bob
 ```
 
+For pairing puzzles (each suspect holds exactly one weapon), the
+solver goal searches the assignment and RULES OUT as clues accumulate
+— multiple answers mean the clues don't determine it yet:
+
+```
+?- pair_up(suspects, weapons, [holds(chancellor, flag), no(ivory, crowbar)], P)
+```
+
+Constraint forms: `holds(A, B)`, `no(A, B)`, `one_of([a, b], B)` (B's
+holder is one of the listed As), `among(A, [b, c])` (A's item is one
+of the listed Bs — "the person in the jury room had either the scales
+or the bag of cash"). Place the surviving pairing in the scene; the
+checks certify it.
+
 `cleared/5` and `could/4` partition the set — every member is one or
-the other (the unknown-room convention makes "unaccounted" count as
-"could be anywhere"); `sole/4` succeeds when exactly one candidate
-remains. Write your own rules file for other domains; the facts don't
-care. Goals need the playground
-served over HTTP (the engine and rules load at runtime); the core
-never evaluates them — `compiled.goals` is data.
+the other; `sole/4` succeeds when exactly one candidate remains. Write
+your own rules file for other domains; the facts don't care. Goals
+need the playground served over HTTP (the engine and rules load at
+runtime); the core never evaluates them — `compiled.goals` is data.
+
+New to Prolog? `examples/prolog-1-facts.scene` and
+`prolog-2-rules.scene` teach it against a world you can see — facts,
+variables, conjunction, negation-as-failure, disjunction, and the
+anatomy of a real rule, each goal answered live under the scene.
+
+**The `unknown` room** — a convention with teeth, so name it exactly
+`unknown`. The *language* attaches no meaning to the name: it's an
+ordinary room, deliberately (ignorance modeled as a place, not a
+construct). But the layers above do: `rules.pl` treats presence in
+`unknown` as *unaccounted* (`could_be_at` lets it mean "could be
+anywhere"; `alibi` won't accept it as an alibi; `with` won't count two
+things parked there as "together"), and the playground's persistence
+reminder skips stays there. Park anything you can't yet place in a
+room named `unknown`; everything downstream then reasons honestly
+about your ignorance. (A future version may replace the magic name
+with a room property — the convention is logged as debt.)
 
 ## Example
 
 ```
 box crate    size(1.2 1.2 1.2) color(#8b5e3c)
 sphere ball  r(0.35) on(crate) color(tomato)
-box wall     size(4 2 0.2) behind(crate 1) color(#5b6575)
+box wall     size(4 2 0.2) north-of(crate 1) color(#5b6575)
 
 ? distance(ball wall)
 ```

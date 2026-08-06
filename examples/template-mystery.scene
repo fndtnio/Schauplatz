@@ -1,0 +1,46 @@
+// MYSTERY-O-MATIC — starter template (timed testimony mysteries)
+//
+// Unlike Murdle's snapshot, these run on a CLOCK: testimony is
+// "X was in R from t1 to t2", and the deduction is about windows.
+//   1. set the clock and the time of death from the puzzle
+//   2. build the map: rooms + door(to) connections
+//   3. transcribe each testimony as a leap in + a leap back to
+//      unknown when it ends (persistence is a claim — when someone's
+//      account runs out, return them; the amber lint watches for it)
+//   4. gate each testimony with a check over its window
+// Solved = checks green, could() narrowed, sole() names one.
+theme paper
+clock 4:00 minute(0.5)
+time time_of_death 4:45
+
+room unknown size(8 2.5 5) at(-9 0 -9) color(black)
+room room_one color(seagreen)
+room room_two west-of(room_one) door(to room_one) color(coral)
+room room_three west-of(room_two) door(to room_two) color(tan)
+
+//victim: found in ___ at ___
+cylinder body r(0.25) h(1.6) at(unknown 3.5 1.5) color(grey)
+turn body to(90 0 0) over(0)
+
+set suspects
+cylinder suspect_one r(0.25) h(1.6) at(unknown -3 -1) color(firebrick)
+cylinder suspect_two r(0.25) h(1.6) at(unknown -2 -1) color(steelblue)
+cylinder suspect_three r(0.25) h(1.6) at(unknown -1 -1) color(seagreen)
+end
+
+// ---- TESTIMONY -------------------------------------------------------
+// the pattern, worked once (replace with your puzzle's accounts):
+// "suspect_one says: I was in room_one from 4:10 to 4:30"
+walk suspect_one to(room_one) over(0) start(4:10)
+walk suspect_one to(unknown -3 -1) over(0) start(4:30)
+check always in(suspect_one room_one) during(4:10 4:30)
+// a leap (over(0)) places without a route — honest about what you
+// don't know; chain walks through door markers when a route is known
+
+// ---- QUESTIONS — watch these narrow as testimony lands ---------------
+// who CANNOT be cleared for the scene of the crime?
+?- could(suspects, X, room_one, time_of_death)
+// the verdict: exactly one candidate left
+?- sole(suspects, X, room_one, time_of_death)
+// where was everyone at the fatal moment?
+?- set_member(suspects, X), where(X, time_of_death, R)

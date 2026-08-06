@@ -1,0 +1,66 @@
+// MURDLE — starter template (early chapters: no suspect statements)
+//
+// Pick up your Murdle book and fill this in:
+//   1. rename rooms/suspects/weapons to your puzzle's cast (add a
+//      fourth of each the same way when the puzzle has them)
+//   2. transcribe each clue under CLUES — as a check that can go red,
+//      or a constraint in the pair_up goal
+//   3. record deductions under DEDUCTIONS: walk people into rooms,
+//      take weapons (possession = take, so the carries gates work)
+// Solved = every check green, every goal bound, one_each true.
+theme paper
+view top
+time found 0
+
+// the staging room: everything unplaced is honestly SOMEWHERE — here.
+// deduction = walking things out of it, one clue at a time
+room unknown size(8 2.5 5) at(-8 0 -8) color(black)
+
+set rooms
+room room_one color(green)
+room room_two west-of(room_one) color(coral)
+room room_three west-of(room_two) color(tan)
+end
+
+//victim: found in ___ — the narration says where; write it down first
+cylinder body r(0.25) h(1.6) at(unknown 3.5 1.5) color(grey)
+turn body to(90 0 0) over(0)
+//walk body to(room_one) over(0)
+
+set suspects
+cylinder suspect_one r(0.25) h(1.6) at(unknown -3 -1) color(firebrick)
+cylinder suspect_two r(0.25) h(1.6) at(unknown -2 -1) color(steelblue)
+cylinder suspect_three r(0.25) h(1.6) at(unknown -1 -1) color(seagreen)
+end
+
+set weapons
+box weapon_one size(0.3 0.1 0.2) at(unknown -3 1) color(firebrick)
+box weapon_two size(0.3 0.1 0.2) at(unknown -2 1) color(steelblue)
+box weapon_three size(0.3 0.1 0.2) at(unknown -1 1) color(seagreen)
+end
+
+// ---- CLUES -----------------------------------------------------------
+// one line per clue, transcribed as you read it. Gates that can go red:
+//   check never carries(suspect_one weapon_two)  // "X never touched Y"
+//   check never in(suspect_two room_three)       // "X was not in R"
+// pairing clues (X holds one of...) go in the pair_up goal below:
+//   holds(a, b)  no(a, b)  one_of([a, b], w)  among(a, [w1, w2])
+
+// ---- DEDUCTIONS ------------------------------------------------------
+// place as clues force it; the goals below narrow as you go:
+//   walk suspect_one to(room_one) over(0)
+//   take suspect_one weapon_one at(found)
+
+// ---- CERTIFICATES — green + bound = solved ---------------------------
+// the pairing search: seeds itself from your takes; add clue
+// constraints to the list. Multiple answers = not determined yet.
+?- pair_up_scene(suspects, weapons, [], P)
+
+// the Murdle contract: every room exactly one suspect / one weapon
+?- one_each(suspects, rooms, found)
+?- one_each(weapons, rooms, found)
+
+// the verdict: needs the body placed — killer and weapon at the scene
+?- where(body, found, R),
+   exactly_one(suspects, R, found, Killer),
+   exactly_one(weapons, R, found, Weapon)

@@ -1,0 +1,30 @@
+// A piston — the slider-crank, motor.scene's missing half.
+//
+// The tube is the engine's CYLINDER; a plain cylinder is the piston
+// sliding in its bore (a prismatic joint: something constrained to a
+// guide). The rod is a link: it draws itself between pin and piston,
+// and distance() audits the mechanism.
+//
+// Watch the audit: the "rigid" rod reads 1.10 at dead center but 1.17
+// at quarter-stroke. ease(in-out) gives the piston near-sinusoidal
+// motion, but a true slider-crank's piston motion isn't sinusoidal —
+// the exact curve needs arithmetic this language refuses to have. The
+// query is the tool being honest about its own approximation.
+theme blueprint
+
+cylinder flywheel r(0.5) h(0.1) at(0 0.8 0) rotate(90 0 0) sides(16)
+sphere pin r(0.08) at(0 1.2 0)
+tube sleeve r(0.35) h(1.2) at(0 1.4 0)
+cylinder piston r(0.3) h(0.5) at(0 2.3 0)
+link rod between(pin piston) r(0.05)
+
+// two full turns; the piston strokes in phase (top dead center at t=0)
+orbit pin around(0 0.8 0) by(-360) axis(z) over(4)
+orbit pin around(0 0.8 0) by(-360) axis(z) over(4)
+move piston by(0 -0.8 0) over(2) ease(in-out)
+move piston by(0 0.8 0) over(2) ease(in-out)
+move piston by(0 -0.8 0) over(2) ease(in-out)
+move piston by(0 0.8 0) over(2) ease(in-out)
+
+? distance(pin piston)
+check always in(piston sleeve)

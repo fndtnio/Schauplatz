@@ -1,0 +1,108 @@
+// The Locked Manor — the multi-story + hypothesis template.
+// (Steal this skeleton for any stacked-house case.)
+//
+// THE STACK: floors are elevations (basement y=0, ground y=3, upper
+// y=6), SLABS between stories block vertical sight (no built-in
+// floors), and the STAIRWELL is a column of rooms — one per floor,
+// same footprint — so "on the stairs" is a queryable fact and moving
+// between floors is a walk to the shaft plus a MOVE up it (walks stay
+// level by design; stairs are honest 3D moves).
+//
+// THE THEORIES: a jewel leaves the upstairs bedroom overnight and is
+// found by the cellar window at dawn. Everything outside the
+// hypothesis blocks is SHARED EVIDENCE — both worlds must survive it.
+// Swap `active` and watch each theory run the same night through the
+// same house.
+
+theme blueprint
+clock 0:00 minute(0.05)
+time dawn 6:00
+
+// --- the house -----------------------------------------------------------
+// basement (y=0): the cellar, with a small high window to the lawn
+room cellar size(5 2.5 5) window(north 0.9 0.7 1.5) color(#3a4150)
+room stairs_b size(2 2.5 2) at(3.9 0 0) door(to cellar) color(#2a2d36)
+
+// ground floor (y=3): the hall and the front door
+room hall size(5 2.5 5) at(0 3 0) door(south 1.2) color(#3a4150)
+room stairs_g size(2 2.5 2) at(3.9 3 0) door(to hall) color(#2a2d36)
+
+// upper floor (y=6): the bedroom
+room bedroom size(5 2.5 5) at(0 6 0) color(#3a4150)
+room stairs_u size(2 2.5 2) at(3.9 6 0) door(to bedroom) color(#2a2d36)
+
+// slabs: cover the rooms, leave the stair shaft open
+box slab_ground size(5.6 0.2 5.6) at(0 2.9 0) color(#31363f)
+box slab_upper size(5.6 0.2 5.6) at(0 5.9 0) color(#31363f)
+
+// the lawn (and the staging room for the unaccounted)
+room outside size(4 2.5 4) at(-8 0 2) color(#2e4438)
+room unknown size(4 2.5 4) at(-8 0 -6) color(black)
+
+// --- the household -------------------------------------------------------
+cylinder owner r(0.26) h(1.7) at(bedroom -1.5 0) color(#8a8d94)   // asleep all night
+cylinder guest r(0.25) h(1.7) at(hall 1.5 1.5) color(#b98a1d)     // on the cot downstairs
+box jewel size(0.25 0.2 0.25) at(bedroom 1.5 -1.5) color(#c8451f)
+set people owner guest
+set valuables jewel
+
+// ====================== THE THEORIES ======================
+hypothesis intruder
+  // a prowler exists only in this world
+  cylinder prowler r(0.25) h(1.75) at(outside 1 0) color(#22304a)
+  // 2:00 — in through the cellar window (a leap: entry is the claim)
+  walk prowler to(cellar 0 1) start(2:00) over(0)
+  // up the stairs: walk to the shaft, MOVE up it, floor by floor
+  walk prowler to(stairs_b) start(2:02) over(1m)
+  move prowler to(stairs_g 0 0.875 0) start(2:04) over(1m)
+  move prowler to(stairs_u 0 0.875 0) start(2:06) over(1m)
+  walk prowler to(bedroom 1.2 -1.5) start(2:08) over(1m)
+  // the jewel travels with him back down
+  walk jewel to(bedroom 1.2 -1.3) start(2:10) over(0)
+  move prowler to(stairs_u 0 0.875 0) start(2:12) over(1m)
+  move jewel to(stairs_u 0.2 0.6 0) start(2:12) over(1m)
+  move prowler to(stairs_b 0 0.875 0) start(2:14) over(2m)
+  move jewel to(stairs_b 0.2 0.6 0) start(2:14) over(2m)
+  walk prowler to(cellar 0 1) start(2:17) over(1m)
+  walk jewel to(cellar -0.3 -1.8) start(2:18) over(0)   // dropped by the window
+  // 2:20 — out the window and gone
+  walk prowler to(outside 1 0) start(2:20) over(0)
+  // this theory's own claims + coverage
+  check ever in(prowler bedroom)
+  check always in(guest hall) during(0:00 6:00)          // the guest never stirred
+  check always in(jewel cellar) during(2:18 6:00)
+  check always in(prowler outside) during(2:20 6:00)
+end
+
+hypothesis inside_job
+  // the guest does it — same route, no window needed
+  walk guest to(stairs_g) start(2:00) over(1m)
+  move guest to(stairs_u 0 0.875 0) start(2:02) over(1m)
+  walk guest to(bedroom 1.2 -1.5) start(2:04) over(1m)
+  walk jewel to(bedroom 1.2 -1.3) start(2:06) over(0)
+  move guest to(stairs_u 0 0.875 0) start(2:08) over(1m)
+  move jewel to(stairs_u 0.2 0.6 0) start(2:08) over(1m)
+  move guest to(stairs_b 0 0.875 0) start(2:10) over(2m)
+  move jewel to(stairs_b 0.2 0.6 0) start(2:10) over(2m)
+  walk guest to(cellar 0 1) start(2:13) over(1m)
+  walk jewel to(cellar -0.3 -1.8) start(2:14) over(0)   // staged by the window
+  // ...and back to the cot before dawn
+  walk guest to(stairs_b) start(2:16) over(1m)
+  move guest to(stairs_g 0 0.875 0) start(2:18) over(1m)
+  walk guest to(hall 1.5 1.5) start(2:20) over(1m)
+  // this theory's own claims + coverage
+  check ever in(guest bedroom)
+  check always in(jewel cellar) during(2:14 6:00)
+  check always in(guest hall) during(2:22 6:00)
+end
+
+active intruder
+// ==========================================================
+
+// --- the shared evidence: every theory must survive this -----------------
+check in(jewel bedroom) at(1:00)                 // it was there at one
+check in(jewel cellar) at(dawn)                  // found by the window at six
+check always in(owner bedroom) during(0:00 6:00) // the owner never left the bed
+check never sees(owner jewel) during(2:30 6:00)  // ...and can't see where it went
+? when in(jewel cellar)                           // when did it arrive?
+?- where(jewel, dawn, R)                          // rules-side: the find spot

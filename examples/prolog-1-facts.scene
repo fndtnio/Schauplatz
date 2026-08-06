@@ -1,0 +1,52 @@
+// PROLOG TUTORIAL 1 — facts, queries, variables.
+//
+// A Prolog program is a pile of FACTS and questions asked against
+// them. The magic of doing this in Schauplatz: you never write facts
+// by hand — the scene you're looking at COMPILES into them. Press the
+// `facts` button right now and look: room(kitchen), in(cat, kitchen,
+// 0, 0), and so on. That table is what every goal below runs against.
+// The 3D view and the fact base are the same world, twice.
+//
+// Vocabulary in 30 seconds:
+//   lowercase  = an ATOM, a name: cat, kitchen  (must match exactly)
+//   Uppercase  = a VARIABLE: R, X, Who  (Prolog finds what fits)
+//   ?- goal    = a question; the purple answers below are Prolog's replies
+
+view top
+theme clay
+time now 0
+
+room kitchen color(#c8a05a)
+room garden east-of(kitchen) color(#7fa06a)
+
+cylinder cat r(0.2) h(0.5) at(kitchen -1 0) color(#8a6a4a)
+cylinder dog r(0.25) h(0.7) at(garden 1 0) color(#5a5a5a)
+sphere ball r(0.15) at(kitchen 1 1) color(#c8451f)
+
+// --- 1. GROUND queries: no variables, just true or false ---------------
+// "Is the cat in the kitchen?" Prolog looks for a matching fact.
+?- present_at(cat, kitchen, 0)
+// "Is the cat in the garden?" No fact says so — and the fact base is
+// COMPLETE (it came from geometry), so unprovable means no.
+?- present_at(cat, garden, 0)
+
+// --- 2. VARIABLES: let Prolog fill in the blank ------------------------
+// "WHERE is the cat?" R is a variable; the answer is a BINDING.
+?- where(cat, now, R)
+// "WHO (or what) is in the kitchen?" Variables enumerate EVERY answer
+// that fits — note the ball counts; Prolog doesn't know cats from toys.
+?- present_at(X, kitchen, 0)
+
+// --- 3. CONJUNCTION: goals chained with a comma, sharing variables -----
+// "Is the cat in the same room as the ball?" The SAME R must satisfy
+// both goals — that shared variable is the whole trick.
+?- where(cat, now, R), where(ball, now, R)
+// The same question, packaged as a reusable rule (see with/3 in
+// rules.pl — a rule is just a named, parameterized conjunction):
+?- with(cat, ball, now)
+// And the dog? Different rooms, no R fits both:
+?- where(cat, now, R), where(dog, now, R)
+
+// checks work alongside goals — the in-language layer sees the same world
+check in(cat kitchen) at(now)
+check never in(dog kitchen)

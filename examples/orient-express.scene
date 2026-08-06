@@ -23,12 +23,12 @@ time time_of_death 1:30   // the truth, between visits
 
 // --- the Calais coach: seven compartments and the corridor ------------
 room poirot_cabin size(2.2 2.5 2) at(-7.8 0 0) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
-room ratchett_cabin size(2.2 2.5 2) right-of(poirot_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
-room hubbard_cabin size(2.2 2.5 2) right-of(ratchett_cabin) color(#31415e) door(to corridor) door(to ratchett_cabin 0.7) window(north 1.1 0.9 0.9)
-room macqueen_cabin size(2.2 2.5 2) right-of(hubbard_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
-room arbuthnot_cabin size(2.2 2.5 2) right-of(macqueen_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
-room mary_cabin size(2.2 2.5 2) right-of(arbuthnot_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
-room princess_cabin size(2.2 2.5 2) right-of(mary_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room ratchett_cabin size(2.2 2.5 2) east-of(poirot_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room hubbard_cabin size(2.2 2.5 2) east-of(ratchett_cabin) color(#31415e) door(to corridor) door(to ratchett_cabin 0.7) window(north 1.1 0.9 0.9)
+room macqueen_cabin size(2.2 2.5 2) east-of(hubbard_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room arbuthnot_cabin size(2.2 2.5 2) east-of(macqueen_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room mary_cabin size(2.2 2.5 2) east-of(arbuthnot_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
+room princess_cabin size(2.2 2.5 2) east-of(mary_cabin) color(#31415e) door(to corridor) window(north 1.1 0.9 0.9)
 room corridor size(18.2 2.5 1.4) at(0 0 2.1) color(#31415e) window(south 14 0.9 0.9)
 
 // --- the passengers ----------------------------------------------------
