@@ -25,6 +25,7 @@ There are three statement forms:
 group <name> <property>...                  define a group (a named frame)
 room <name> <property>...                   define a room (sugar: group + walls)
 tube <name> <property>...                   define a hollow cylinder (sugar: group + ring)
+person <name> <property>...                 define a person (sugar: body + head at human scale)
 link <name> between(a b) <property>...      a derived connector spanning two things
 part <name> ... end                         define a part (a reusable noun)
 <part> <name> <property>...                 instantiate a part
@@ -36,8 +37,10 @@ take <holder> <thing> at(time) off(...)?    possession begins (an instant event)
 drop <holder> <thing> at(time)              possession ends — the thing lands there
 theme <name>                                whole-scene look (rendering only)
 view <name>                                 projection & vantage (rendering only)
+camera <property>...                        scripted camera segment (rendering only)
 clock <h:mm> minute(seconds)?               wall-clock time for the timeline
 set <name> <member>...                      a named collection queries quantify over
+statement <speaker> <claim>                 testimony as data — the liar certificate derives
 ? <query>(<args>)                           ask a question about the scene
 check <quantified query>                    assert it — failing is a compile error
 ```
@@ -161,7 +164,7 @@ moves as one).
 | property | meaning | default |
 |---|---|---|
 | `size(w h d)` | the **interior**; walls extrude outward | `size(4 2.5 4)` |
-| `walls(t)` | wall thickness; `walls(0)` = an **open room** — no walls, just a flat ground pad (a yard, a plaza); query bounds are the declared interior, so `in()` works at full height. No doors or windows (nothing to cut them into) | `0.2` |
+| `walls(t)` | wall thickness; `walls(0)` = an **open room** — no walls, just a flat ground pad (a yard, a plaza); query bounds are the declared interior, so `in()` works at full height. No doors or windows *on* it (nothing to cut into) — but a walled neighbour may declare `door(to the_yard)`: its wall carves one-sided and the adjacency fact is real | `0.2` |
 | `door(side width? offset?)` | a gap in a wall; side is `north/south/east/west`, offset slides it along the wall | width 1, centered |
 | `door(to room width?)` | a **shared** doorway: finds the facing walls, checks the rooms really touch, and carves one aligned opening into *both* rooms, centered on their shared stretch | width 1 |
 | `window(side width? height? sill? offset?)` | a **y-band** opening: wall stays below (the sill) and above (the lintel); sight, air — and small things — pass through the band | 0.8 × 0.8, sill 1, centered |
@@ -263,6 +266,34 @@ they are excluded from the whereabouts fact export (a tube is a place
 things pass through, not a thing with a location; a solid `cylinder` is
 still the right shape for a hand-held pipe that rules must track).
 
+## People
+
+`person <name> h()? color()?` — the most common object in a mystery,
+as a noun: a body cylinder with a head sphere at honest human
+proportions. `person bob at(garden)` reads the way a scene is
+described, and encodes the units convention (people ≈ 1.7m) without
+anyone remembering the numbers:
+
+```
+person guard at(cell) color(steelblue)
+person kid h(1.1) at(cell 1 1)          // h() scales the whole figure
+walk guard to(gate) over(3)
+take guard lantern at(2:00)
+```
+
+Sugar: a group + `<name>-body` + `<name>-head` (family `<name>/person`
+— one palette slot, no implicit set). Base-anchored like a room: bare
+= standing on the ground, `at()` places the feet. Everything composes
+as you'd hope: people walk, turn, block sight lines (body and head
+individually — the sergeant still fills the doorway), hold things
+(concealed at chest height), get painted, repeat, and scale inside
+parts. **Facts speak the person's name**, not their parts: whereabouts
+export `bob`, never `bob-head`, and person groups join the sight-fact
+cast (their union center is a chest-height endpoint).
+
+A plain `cylinder` is still fine for a person — `person` is the same
+facts with a face on them.
+
 ## Possession
 
 `held-by(<holder> dx? dy? dz?)` declares that a thing is carried (or
@@ -285,6 +316,17 @@ ticket really is in the room. Give an offset to show the thing
 (`held-by(slate 0.4 0 0)` — a lantern in hand); the offset rotates with
 the holder like a pocket. In the playground, hovering an object lists
 what it holds.
+
+A `person` holder also takes a named **wear anchor** instead of
+numbers — `head`, `neck`, `chest`, `back`, `hand` — computed from
+their proportions (a scaled person wears things at scaled heights),
+riding rotation like any offset. `held-by(bob neck)` is a worn scarf:
+visible, and honestly *seeable* — `sees(witness scarf)` can be true,
+where the pocketed version is concealed by the body. Worn vs pocketed
+is a real evidentiary distinction, and it's just geometry. `take`
+accepts anchors too: `take cop lantern at(2:00) off(hand)`. The
+person's front is north (−z) until rotated; anchors on non-person
+holders are an error (anatomy — give numbers instead).
 
 Holders can be anything placed (a person, a box, a group, a room —
 "the safe holds the will"). Held things must be plain shapes, and they
@@ -685,6 +727,7 @@ theme ink
 | `paper` | warm cream paper, navy-ink outlines and shadows, riso-print palette — vintage journal |
 | `rts` | dark terrain, player-color palette, selection rings under every object — game map |
 | `snow` | white snowfield, overcast winter light, blue-grey shadows, woolen palette — the Orient Express look |
+| `asphalt` | hazy daylight over a lit asphalt lot, crisp shadows, signal-paint palette — bus stops, airports, street scenes |
 
 **Custom themes** live in `themes.json` beside the playground — pure
 data, no code. Each entry is usable as `theme <name>`; missing fields
@@ -719,7 +762,45 @@ Omitted means the free perspective camera. The playground still orbits
 in any view; the statement sets where you start and how parallel lines
 behave, not a cage. One `view` per scene.
 
-## Queries
+## Camera
+
+`camera` statements script the shot — a projection channel speaking
+the animation grammar. Like `theme` and `view`, **zero semantic
+effect**: the camera has no bounds, blocks no sight line, appears in
+no fact, and never extends the timeline. It changes what you see,
+never what is true.
+
+```
+camera to(4 6 8) over(0) look(study)               // a CUT: over(0)
+camera to(hall 0 0.4 1) start(0.8) over(1) look(holmes)   // a dolly
+camera from(holmes) start(3:01)                    // first person
+camera to(study -1 1.6 2) start(3:03) over(2) look(desk)
+```
+
+Segments chain in written order like `move` segments (`start`/`after`/
+`over`/`ease`; inside an `at` block they inherit the block time).
+`to(x y z)`, `to(name)`, or `to(name dx dy dz)` dollies the camera —
+a room resolves to eye height (1.6) at its center, anything else to
+its bounds center. `from(name)` **mounts** the camera on an object:
+first person, riding at eye height (a `person`'s eyes, an object's
+center), facing along its motion, until the next position segment
+takes over — the mounted object is hidden so you look through it, not
+at the inside of its head. `look()` aims: a point, a compass word
+(`north`/`south`/`east`/`west`), or a name — and a name **tracks its
+target live**. (The `to(name)`-no-pursuit rule is about world facts;
+aiming is projection, so a camera may follow.) Unaimed mounts face
+their carrier's motion — a mount *clears* any aim declared before it
+(the approach dolly's `look(holmes)` must not leave the mounted camera
+staring down its own body); a look declared at or after the mount
+wins. Everything else holds the last aim, or the scene origin.
+
+Before the first segment starts, the free camera applies. In the
+playground, grabbing the viewport takes the wheel back (orbiting
+resumes); recompiling returns it to the script. A dolly takes the
+straight line — through walls if they're in the way; film cuts
+(`over(0)`) are the idiom for room-to-room jumps. First-person note:
+what a mounted camera shows is the `sees()` predicate, rendered — you
+are standing inside the fact.
 
 Queries are statements that return answers instead of creating objects.
 Answers appear in the output panel under the editor.
@@ -736,6 +817,10 @@ Answers appear in the output panel under the editor.
 ? carries(a b)      does a hold b right now — directly or through a
                     chain (the snake in the bag in the hand)? reads the
                     possession timeline, not geometry
+? touches(a b)      are the two in physical contact — face to face or
+                    overlapping? the complement of overlaps' strictness
+                    (overlaps excludes touching; touches includes
+                    overlapping); a visible gap is false
 ? adjacent(a b)     do the two ROOMS share a declared door? read off the
                     door(to) graph — a static fact about the floor plan
 ```
@@ -910,6 +995,12 @@ data, exported for **set members only** (the cast you've named is the
 cast rules reason about; all-pairs would be quadratic). With them,
 "is every crate on camera" is one rule-side double negation — see
 `all_visible`/`unseen` in rules.pl and `examples/storeroom.scene`.
+**Contact intervals** — `touches(a, b, t0, t1)`, set members only,
+symmetric, same sweep: face-to-face or overlapping counts, a gap does
+not. rules.pl derives `touches_at/3` and `reaches/3` — reachability
+through contact at a named time, loop-safe — which turns a circuit's
+conductivity, a domino run, or a train coupling into one recursive
+rule (`examples/prolog-4-circuits.scene`).
 Also **order facts** — `left_of(a, b)` for set members (rooms
 included), sampled where things **end up**, so a deduction-time
 timeline exports its solved arrangement. rules.pl derives
@@ -971,10 +1062,46 @@ your own rules file for other domains; the facts don't care. Goals
 need the playground served over HTTP (the engine and rules load at
 runtime); the core never evaluates them — `compiled.goals` is data.
 
+**Per-scene rules** — goals run in written order in one session, so an
+early goal can teach the session a rule that later goals use:
+
+```
+?- assertz(loves(vincent, mia))
+?- assertz((jealous(X, Y) :- loves(X, Z), loves(Y, Z), X \= Y))
+?- jealous(A, B)
+```
+
+This is the honest home for rules (and facts) that belong to one scene
+rather than to `rules.pl`: they live in the file, they ship with it,
+and — like everything asserted rather than derived — the world does
+not vouch for them. Note this is the one ordered corner of the
+language: scene statements are order-free facts, but the goal list is
+a *session* — definitions before uses.
+
 New to Prolog? `examples/prolog-1-facts.scene` and
 `prolog-2-rules.scene` teach it against a world you can see — facts,
 variables, conjunction, negation-as-failure, disjunction, and the
 anatomy of a real rule, each goal answered live under the scene.
+
+### statements — testimony as data
+
+```
+statement viscount_eminence \+ present_at(viscount_eminence, college, 0)
+statement vice_president_mauve carries_at(viscount_eminence, help_career, 0)
+```
+
+`statement <speaker> <claim>` declares what someone SAID — the claim
+in goal syntax, transcribed literally (what the words assert, never
+who they implicate). Declared once, it drives two derived panel lines:
+each claim's **truth in the current world** (`viscount_eminence: … →
+false` — not an error; a false statement is the lie the contract
+predicts), and the assembled **liar certificate**: exactly one
+speaker's claim false names the murderer, bold when it binds. The
+speaker must be a scene object; claims are unevaluated data in the
+core, like goals. Inside a hypothesis block, a statement exists only
+in worlds that select it. The certificate is the body-free form —
+pair it with the `where(body …)` verdict conjunction for the
+geometric cross-check. See `template-murdle-liars.scene`.
 
 **The `unknown` room** — a convention with teeth, so name it exactly
 `unknown`. The *language* attaches no meaning to the name: it's an

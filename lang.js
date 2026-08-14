@@ -30,8 +30,8 @@
     "west-of": 0.25, "east-of": 0.25, "south-of": 0.25, "north-of": 0.25,
   };
 
-  const QUERIES = new Set(["overlaps", "distance", "sees", "blocked-by", "in", "adjacent", "carries"]);
-  const BOOLEAN_QUERIES = new Set(["sees", "overlaps", "in", "carries"]); // quantifiable / checkable
+  const QUERIES = new Set(["overlaps", "distance", "sees", "blocked-by", "in", "adjacent", "carries", "touches"]);
+  const BOOLEAN_QUERIES = new Set(["sees", "overlaps", "in", "carries", "touches"]); // quantifiable / checkable
 
   // Themes are a whole-scene rendering hint: zero semantic effect (bounds,
   // sight lines, and queries ignore them). The core only validates the name
@@ -128,6 +128,8 @@
     const times = new Map(); // name -> { name, tok, line, value } — named time facts
     const goals = []; // ?- goal(...) — questions FOR THE RULES LAYER, data here
     const events = []; // take/drop — possession changing hands on the timeline
+    const statements = []; // statement <speaker> <claim> — testimony as data
+    const cameras = []; // camera segments — scripted projection, zero semantics
     let theme = null; // { name, line }
     let view = null; // { name, line }
     let clock = null; // { start: minutes, minute: seconds-per-story-minute, line }
@@ -427,7 +429,7 @@
           setBlock = null;
           return;
         }
-        if (/^(move|turn|orbit|walk|paint|take|drop|at|check|set|theme|view|time|clock)\b/.test(line) || line.startsWith("?")) {
+        if (/^(move|turn|orbit|walk|paint|take|drop|at|check|set|theme|view|time|clock|statement|camera)\b/.test(line) || line.startsWith("?")) {
           errors.push({
             line: lineNo,
             msg: `a set block encloses declarations — only objects belong inside (set "${setBlock.name}" open since line ${setBlock.line})`,
@@ -519,7 +521,7 @@
         parseQuery(line.slice(1), lineNo, queries, errors, timeCtx, false, blockAt);
       } else if (/^check\b/.test(line)) {
         parseQuery(line.slice(5), lineNo, queries, errors, timeCtx, true, blockAt);
-      } else if (block && !/^(move|turn|orbit|walk|paint|take|drop)\b/.test(line)) {
+      } else if (block && !/^(move|turn|orbit|walk|paint|take|drop|camera)\b/.test(line)) {
         // a time block scopes EVENTS; things that exist are declared outside
         errors.push({
           line: lineNo,
@@ -550,6 +552,24 @@
         parseAnim(line, lineNo, anims, errors, timeCtx, blockAt);
       } else if (/^(take|drop)\b/.test(line)) {
         parsePossess(line, lineNo, events, errors, timeCtx, blockAt);
+      } else if (/^camera\b/.test(line)) {
+        parseCamera(line, lineNo, cameras, errors, timeCtx, blockAt);
+      } else if (/^statement\b/.test(line)) {
+        // statement <speaker> <claim> — testimony as DATA: the claim is
+        // goal syntax, carried unevaluated (its vocabulary belongs to
+        // the rules, like ?- goals). Declared ONCE; the playground
+        // assembles the liar certificate from all statements. Inside a
+        // hypothesis block, a statement exists only in worlds that
+        // select it.
+        const m = line.match(/^statement\s+([A-Za-z_][\w-]*)\s+(.+)$/);
+        if (!m) {
+          errors.push({
+            line: lineNo,
+            msg: "expected: statement <speaker> <claim> — e.g. statement bob present_at(bob, garden, 0)",
+          });
+        } else {
+          statements.push({ speaker: m[1], claim: m[2].trim().replace(/\.$/, ""), line: lineNo });
+        }
       } else if (/^theme\b/.test(line)) {
         const m = line.match(/^theme\s+([A-Za-z_][\w-]*)$/);
         if (!m) {
@@ -606,7 +626,7 @@
     }
 
     return {
-      objects, queries, anims, events, errors, sets, goals,
+      objects, queries, anims, events, errors, sets, goals, statements, cameras,
       theme: theme ? theme.name : null,
       view: view ? view.name : null,
       clock: clock ? { start: clock.start, minute: clock.minute } : null,
@@ -820,9 +840,16 @@
         if (t === null || t < 0) return err("at(): expected a time >= 0 (seconds, a time name, or 2:30 with a clock)");
         e.t = t;
       } else if (key === "off" && kind === "take") {
-        const v = nums(args, 3);
-        if (!v) return err("off(): expected 3 numbers — where the thing rides on the holder");
-        e.off = v;
+        if (args.length === 1 && num(args[0]) === null) {
+          if (!WEAR_ANCHORS.has(args[0])) {
+            return err(`off(): unknown anchor "${args[0]}" — one of ${[...WEAR_ANCHORS].join(", ")} (or give dx dy dz)`);
+          }
+          e.anchor = args[0];
+        } else {
+          const v = nums(args, 3);
+          if (!v) return err("off(): expected 3 numbers or an anchor (head, neck, chest, back, hand)");
+          e.off = v;
+        }
       } else {
         return err(`${kind} doesn't take ${key}() — just at(time)${kind === "take" ? " and off(dx dy dz)" : ""}`);
       }
@@ -832,6 +859,112 @@
       return err(`${kind} needs at(<time>) — the moment possession ${kind === "take" ? "begins" : "ends"}`);
     }
     events.push(e);
+  }
+
+  // camera <props> — the SCRIPTED CAMERA: a projection channel speaking
+  // the animation grammar. to() dollies (over(0) is a cut), from()
+  // mounts the camera on an object (first person — it rides until the
+  // next position segment), look() aims. Zero semantic effect: the
+  // camera has no bounds, blocks nothing, and never appears in facts —
+  // it changes what you see, never what is true. Because aiming is
+  // projection, look(name) TRACKS its target live (the to()-no-pursuit
+  // rule is about world facts; a camera may follow).
+  const COMPASS_DIRS = { north: [0, 0, -1], south: [0, 0, 1], east: [1, 0, 0], west: [-1, 0, 0] };
+  const WEAR_ANCHORS = new Set(["head", "neck", "chest", "back", "hand"]);
+
+  // A wear anchor on a person, as an offset from their BOUNDS CENTER
+  // (which is what deriveHeld offsets from): computed from the same
+  // proportions makePerson uses, so a scaled person wears things at
+  // scaled heights. Front is -z (the compass north the person faces
+  // by default); hand is the +x side.
+  function wearOffset(person, anchor) {
+    const h = person.h;
+    const headR = 0.11 * h;
+    const bodyH = h - 2 * headR;
+    const bodyR = 0.15 * h;
+    const c = h / 2; // bounds center height (feet at 0, crown at h)
+    switch (anchor) {
+      case "head": return [0, h - c, 0]; // at the crown — a hat's brim sits on it
+      case "neck": return [0, bodyH - c, -bodyR]; // top of the body, at the front surface
+      case "chest": return [0, 0.62 * bodyH - c, -bodyR];
+      case "back": return [0, 0.62 * bodyH - c, bodyR];
+      case "hand": return [bodyR + 0.04 * h, 0.42 * bodyH - c, 0];
+    }
+  }
+  function parseCamera(line, lineNo, cameras, errors, timeCtx, blockAt) {
+    const err = (msg) => errors.push({ line: lineNo, msg });
+    const seg = { to: null, from: null, look: null, start: null, after: null, over: null, ease: "linear", line: lineNo };
+    const timeArg = (args, key) => {
+      if (args.length !== 1) return null;
+      const w = wallTime(args[0], timeCtx, (msg) => err(`${key}(): ${msg}`));
+      if (Number.isNaN(w)) return NaN;
+      return w !== null ? w : num(args[0]);
+    };
+    let r = line.slice(6).trim();
+    while (r.length) {
+      const pm = r.match(/^([A-Za-z_][\w-]*)\(([^)]*)\)\s*/);
+      if (!pm) return err(`can't read "${r}" — properties look like name(args)`);
+      const key = pm[1];
+      const args = splitArgs(pm[2]);
+      r = r.slice(pm[0].length);
+      switch (key) {
+        case "to": {
+          // to(x y z), to(name), or to(name dx dy dz) — the usual
+          // destination grammar, camera edition
+          if (args.length >= 1 && num(args[0]) === null) {
+            const off = args.length > 1 ? nums(args.slice(1), 3) : [0, 0, 0];
+            if (!off) return err("camera to(name dx dy dz): expected 3 numbers after the name");
+            seg.to = { ref: args[0], off };
+            break;
+          }
+          const v = nums(args, 3);
+          if (!v) return err("camera to(): expected 3 numbers, or a name with an optional dx dy dz");
+          seg.to = v;
+          break;
+        }
+        case "from": {
+          if (args.length !== 1 || num(args[0]) !== null) return err("camera from(): expected one object name");
+          seg.from = { ref: args[0] };
+          break;
+        }
+        case "look": {
+          if (args.length === 1 && COMPASS_DIRS[args[0]]) { seg.look = { dir: COMPASS_DIRS[args[0]] }; break; }
+          if (args.length === 1 && num(args[0]) === null) { seg.look = { ref: args[0] }; break; }
+          const v = nums(args, 3);
+          if (!v) return err("camera look(): expected a name, north/south/east/west, or 3 numbers");
+          seg.look = { at: v };
+          break;
+        }
+        case "start": {
+          const v = timeArg(args, "start");
+          if (Number.isNaN(v)) return;
+          if (v === null || v < 0) return err("start(): expected a time >= 0 (or 5:15 with a clock)");
+          seg.start = v;
+          break;
+        }
+        case "after": case "over": {
+          if (args.length === 1 && /:/.test(args[0])) {
+            return err(`${key}(): takes a duration, not a clock time — use ${key}(2m) or seconds`);
+          }
+          const v = timeArg(args, key);
+          if (Number.isNaN(v)) return;
+          if (v === null || v < 0) return err(`${key}(): expected a non-negative duration`);
+          seg[key] = v;
+          break;
+        }
+        case "ease": {
+          if (args.length !== 1 || !(args[0] in EASES)) return err(`ease(): one of ${Object.keys(EASES).join(", ")}`);
+          seg.ease = args[0];
+          break;
+        }
+        default:
+          return err(`${key}(): unknown property for camera`);
+      }
+    }
+    if (seg.to && seg.from) return err("camera: to() or from(), not both — a dolly or a mount");
+    if (!seg.to && !seg.from && !seg.look) return err("camera needs to(), from(), or look()");
+    if (blockAt != null && seg.start === null && seg.after === null) seg.start = blockAt.t0;
+    cameras.push(seg);
   }
 
   // Parses the body of `? ...` queries and `check ...` assertions — the
@@ -959,12 +1092,12 @@
     const [, shape, name, rest] = stmt;
 
     const partDef = ctx && ctx.parts && ctx.parts.get(shape);
-    if (!SHAPES.has(shape) && shape !== "group" && shape !== "room" && shape !== "tube" && shape !== "link" && !partDef) {
+    if (!SHAPES.has(shape) && shape !== "group" && shape !== "room" && shape !== "tube" && shape !== "person" && shape !== "link" && !partDef) {
       if (ctx && ctx.nestedFrom && ctx.nestedFrom.has(shape)) {
         err(`parts can't use other parts (yet) — "${shape}" must be spelled out here`);
         return;
       }
-      const known = [...SHAPES].join(", ") + ", group, room, tube";
+      const known = [...SHAPES].join(", ") + ", group, room, tube, person";
       const partNames = ctx && ctx.parts && ctx.parts.size ? ", " + [...ctx.parts.keys()].join(", ") : "";
       err(`unknown shape "${shape}" (available: ${known}${partNames})`);
       return;
@@ -994,6 +1127,10 @@
     }
     if (shape === "tube") {
       makeTube(name, props, lineNo, objects, err, timeCtx);
+      return;
+    }
+    if (shape === "person") {
+      makePerson(name, props, lineNo, objects, err, timeCtx);
       return;
     }
     if (partDef) {
@@ -1111,6 +1248,7 @@
             : o.at.map((v) => v * s);
         }
         if (o.heldBy) o.heldBy = { ...o.heldBy, off: o.heldBy.off.map((v) => v * s) };
+        if (o.person) o.person = { ...o.person, h: o.person.h * s };
         if (o.size) o.size = o.size.map((v) => v * s);
         if (o.r !== null) o.r *= s;
         if (o.h !== null) o.h *= s;
@@ -1368,7 +1506,7 @@
       // open room: a flat pad instead of walls; doors/windows have no
       // wall to live in
       if (autos.length || Object.values(doors).some((d) => d.length) || Object.values(windows).some((w) => w.length)) {
-        return err(`"${name}" is an open room (walls(0)) — there are no walls for doors or windows`);
+        return err(`"${name}" is an open room (walls(0)) — there are no walls for doors or windows (declare the doorway from the walled neighbour instead: door(to ${name}) carves its wall and declares adjacency)`);
       }
       members.push({
         name: `${name}-ground`, shape: "box", line: lineNo,
@@ -1573,6 +1711,81 @@
       }
     }
     group.tube = { r, h, thick, sides, color };
+    objects.set(name, group);
+    for (const m of members) objects.set(m.name, m);
+  }
+
+  // person <name> h()? color()? — the most common object in a mystery,
+  // as a noun: a body cylinder with a head sphere at honest human
+  // proportions (the units convention's "people ≈ 1.7" made flesh).
+  // Base-anchored like a room: bare = standing on the ground, at()
+  // places the feet. Facts speak the person's NAME, not their parts —
+  // members are excluded from whereabouts, the group is the mover.
+
+  function makePerson(name, props, lineNo, objects, err, timeCtx) {
+    const group = {
+      name, shape: "group", line: lineNo,
+      size: null, r: null, h: null, sides: null,
+      at: null, rel: null, rot: [0, 0, 0], color: null,
+      appear: 0, vanish: null, parent: null,
+    };
+    let h = 1.7;
+    let color = null;
+
+    for (const p of props) {
+      switch (p.key) {
+        case "h": {
+          const v = nums(p.args, 1);
+          if (!v || v[0] <= 0) return err("h(): expected one positive number — total height");
+          h = v[0];
+          break;
+        }
+        case "color": {
+          if (p.args.length !== 1) return err("color(): expected one color name or #hex");
+          color = p.args[0];
+          break;
+        }
+        default:
+          if (!applyProp(group, p, err, timeCtx)) return;
+      }
+    }
+
+    if (group.at && group.rel) {
+      return err(`"${name}": use at() or a placement relation, not both`);
+    }
+    if (group.vanish !== null && group.vanish <= group.appear) {
+      return err(`"${name}": vanish(${group.vanish}) must come after appear(${group.appear})`);
+    }
+
+    // proportions from total height: head is ~22% of height in diameter,
+    // the body cylinder fills the rest, the head sphere sits on top
+    const headR = 0.11 * h;
+    const bodyH = h - 2 * headR;
+    const bodyR = 0.15 * h;
+    const members = [
+      {
+        name: `${name}-body`, shape: "cylinder", line: lineNo,
+        size: null, r: bodyR, h: bodyH, sides: null,
+        at: [0, bodyH / 2, 0], rel: null, rot: [0, 0, 0], color,
+        appear: group.appear, vanish: group.vanish, parent: name,
+        family: `${name}/person`, // one palette slot; "/" keeps it out of implicit sets
+      },
+      {
+        name: `${name}-head`, shape: "sphere", line: lineNo,
+        size: null, r: headR, h: null, sides: null,
+        at: [0, bodyH + headR, 0], rel: null, rot: [0, 0, 0], color,
+        appear: group.appear, vanish: group.vanish, parent: name,
+        family: `${name}/person`,
+      },
+    ];
+    for (const m of members) {
+      if (objects.has(m.name)) {
+        return err(
+          `person "${name}" creates a part named "${m.name}", but that name is taken (line ${objects.get(m.name).line})`,
+        );
+      }
+    }
+    group.person = { h, color };
     objects.set(name, group);
     for (const m of members) objects.set(m.name, m);
   }
@@ -1832,14 +2045,24 @@
         // spot by default (concealed on the person; the geometry makes
         // sees() honestly false while in() stays true), an offset shows
         // it. The offset rides the holder's rotation like a pocket.
+        // A person holder also takes a named WEAR ANCHOR — head, neck,
+        // chest, back, hand — computed from their proportions: worn
+        // possession, visible (and honestly seeable) instead of pocketed.
         if (obj.shape === "group") {
           return bad("groups can't be held — hold a plain shape (a box can be the package)");
         }
         if (args.length < 1 || num(args[0]) !== null) {
-          return bad("expected held-by(holder) or held-by(holder dx dy dz)");
+          return bad("expected held-by(holder), held-by(holder dx dy dz), or held-by(person head|neck|chest|back|hand)");
+        }
+        if (args.length === 2 && num(args[1]) === null) {
+          if (!WEAR_ANCHORS.has(args[1])) {
+            return bad(`unknown anchor "${args[1]}" — one of ${[...WEAR_ANCHORS].join(", ")} (or give dx dy dz)`);
+          }
+          obj.heldBy = { ref: args[0], anchor: args[1], off: [0, 0, 0] };
+          return true;
         }
         const off = args.length > 1 ? nums(args.slice(1), 3) : [0, 0, 0];
-        if (!off) return bad("expected held-by(holder) or held-by(holder dx dy dz)");
+        if (!off) return bad("expected held-by(holder), held-by(holder dx dy dz), or held-by(person head|neck|chest|back|hand)");
         obj.heldBy = { ref: args[0], off };
         return true;
       }
@@ -2282,7 +2505,11 @@
           // not the ground floor below it (base 0 for ground rooms:
           // identical to the old ground-rest)
           const tBase = t.pos[1] + (t.bboxOff ? t.bboxOff[1] : 0) - t.dims.h / 2;
-          pos = [t.pos[0] + o.at.dx, tBase + d.h / 2, t.pos[2] + o.at.dz];
+          // rest the object's UNION on the target's base: subtract the
+          // bbox offset like relations do, so an off-origin group (a
+          // person — origin at the feet) stands ON the floor, not
+          // floated by half its height (shapes: off is zero, unchanged)
+          pos = [t.pos[0] + o.at.dx, tBase + d.h / 2 - off[1], t.pos[2] + o.at.dz];
         }
       } else if (o.at) {
         // at(x z): x/z only — keep the default rest y (h/2 for shapes,
@@ -2413,13 +2640,15 @@
         continue;
       }
       if (a.kind === "paint" && (obj.shape === "group" || obj.shape === "marker")) {
-        if (obj.room || obj.tube) {
+        if (obj.room || obj.tube || obj.person) {
           // painting a ROOM (or a tube) paints its walls — the same
           // surfaces its color() owns at birth (segments, sills and
           // lintels included). Runs post-carve, so it lands on the real
           // wall pieces.
           for (const w of objects.values()) {
-            if (w.parent !== obj.name || w.shape !== "box") continue;
+            // rooms/tubes paint their box pieces; a person paints all
+            // their parts (body cylinder + head sphere)
+            if (w.parent !== obj.name || (w.shape !== "box" && !obj.person)) continue;
             const wkey = w.name + "/paint";
             const wcur = cursors.get(wkey) || { end: w.appear + (w.clockShift || 0), lastTo: null };
             const wt0 = a.start !== null ? a.start + (a.startShift || 0) : wcur.end + (a.after || 0);
@@ -2599,6 +2828,21 @@
   // it can refuse things that also animate themselves, and returns the
   // timeline duration extended to cover the last event.
   function buildPossession(objects, events, errors, duration) {
+    // a wear anchor names person anatomy — resolve it to a numeric
+    // offset here, where the holder is known (order-free scenes mean
+    // parse time is too early)
+    const anchorOff = (holderName, anchor, line) => {
+      const holder = objects.get(holderName);
+      if (!holder) return null; // missing holder reported elsewhere
+      if (!holder.person) {
+        errors.push({
+          line,
+          msg: `anchor "${anchor}": "${holderName}" isn't a person — anchors are anatomy; give a numeric offset instead`,
+        });
+        return null;
+      }
+      return wearOffset(holder.person, anchor);
+    };
     const byThing = new Map();
     for (const e of events) {
       const thing = objects.get(e.thing);
@@ -2625,7 +2869,11 @@
       let bad = false;
       for (let i = 1; i < evs.length; i++) {
         if (evs[i].t === evs[i - 1].t) {
-          errors.push({ line: evs[i].line, msg: `two possession events for "${name}" at the same time — order them` });
+          errors.push({
+            line: evs[i].line,
+            msg: `two possession events for "${name}" at the same time — order them` +
+              ` (or, if "${evs[i - 1].holder}" should keep holding it, take "${evs[i - 1].holder}" instead — chains carry)`,
+          });
           bad = true;
         }
       }
@@ -2649,11 +2897,16 @@
       if (bad) continue;
       const intervals = [];
       const drops = [];
-      let cur = o.heldBy ? { t0: 0, holder: o.heldBy.ref, off: o.heldBy.off } : null;
+      let cur = o.heldBy
+        ? {
+            t0: 0, holder: o.heldBy.ref,
+            off: (o.heldBy.anchor && anchorOff(o.heldBy.ref, o.heldBy.anchor, o.line)) || o.heldBy.off,
+          }
+        : null;
       for (const e of evs) {
         if (e.kind === "take") {
           if (cur) intervals.push({ ...cur, t1: e.t }); // hand-off
-          cur = { t0: e.t, holder: e.holder, off: e.off };
+          cur = { t0: e.t, holder: e.holder, off: (e.anchor && anchorOff(e.holder, e.anchor, e.line)) || e.off };
         } else if (!cur || cur.holder !== e.holder) {
           errors.push({
             line: e.line,
@@ -2672,7 +2925,8 @@
     // pure held-by things get the same timeline shape: one open interval
     for (const o of objects.values()) {
       if (o.heldBy && !o.possession) {
-        o.possession = { intervals: [{ t0: 0, t1: null, holder: o.heldBy.ref, off: o.heldBy.off }], drops: [] };
+        const off = (o.heldBy.anchor && anchorOff(o.heldBy.ref, o.heldBy.anchor, o.line)) || o.heldBy.off;
+        o.possession = { intervals: [{ t0: 0, t1: null, holder: o.heldBy.ref, off }], drops: [] };
       }
     }
     return duration;
@@ -2692,6 +2946,154 @@
       if (!h) continue;
       d.pos = [h.pos[0], o.dims.h / 2, h.pos[2]]; // dropped things land: ground-rest at the holder's spot
     }
+  }
+
+  // Camera segments become two channels (position + aim), chained like
+  // animation channels. Runs after resolution: to(name) needs placed
+  // positions. The camera never extends the timeline — projection has
+  // no events.
+  function buildCamera(objects, cameras, errors) {
+    if (!cameras.length) return null;
+    const pos = [];
+    const look = [];
+    let cursor = 0;
+    for (const c of cameras) {
+      const err = (msg) => errors.push({ line: c.line, msg });
+      const t0 = c.start !== null ? c.start : cursor + (c.after || 0);
+      const over = c.over !== null ? c.over : c.to ? 1 : 0;
+      const t1 = t0 + over;
+      cursor = t1;
+      let bad = false;
+      const checkRef = (ref, what) => {
+        const t = objects.get(ref);
+        if (!t) { err(`camera ${what}(): no object named "${ref}"`); bad = true; return null; }
+        if (t.shape === "link" || t.shape === "marker") {
+          err(`camera ${what}(): "${ref}" is a ${t.shape} — no pose to ${what === "from" ? "ride" : "aim at"}`);
+          bad = true;
+          return null;
+        }
+        return t;
+      };
+      if (c.to && c.to.ref !== undefined) {
+        const t = checkRef(c.to.ref, "to");
+        if (t) {
+          // a room: hover at eye height inside it; anything else: its
+          // bounds center — plus the optional slide
+          const base = t.room
+            ? [t.pos[0], t.pos[1] + 1.6, t.pos[2]]
+            : [t.pos[0] + t.bboxOff[0], t.pos[1] + t.bboxOff[1], t.pos[2] + t.bboxOff[2]];
+          c.to = [base[0] + c.to.off[0], base[1] + c.to.off[1], base[2] + c.to.off[2]];
+        }
+      }
+      if (c.from) checkRef(c.from.ref, "from");
+      if (c.look && c.look.ref) checkRef(c.look.ref, "look");
+      if (bad) continue;
+      if (c.to) pos.push({ kind: "to", t0, t1, to: c.to, ease: c.ease });
+      else if (c.from) pos.push({ kind: "mount", t0, ref: c.from.ref });
+      if (c.look) look.push({ t0, t1, ...c.look, ease: c.ease });
+    }
+    // a dolly starts wherever the camera last was: the previous target,
+    // or — after a mount — the mount's pose at the dolly's start (a
+    // dynamic value, resolved at sample time)
+    for (let i = 0; i < pos.length; i++) {
+      if (pos[i].kind !== "to") continue;
+      const prev = pos[i - 1];
+      pos[i].fromPos = !prev
+        ? pos[i].to.slice()
+        : prev.kind === "to"
+          ? prev.to.slice()
+          : { mountRef: prev.ref };
+    }
+    return { pos, look };
+  }
+
+  // Pure camera sampling: {pos, look, mount} at time t, or null before
+  // the first segment (the renderer keeps its free camera). Mounted
+  // cameras ride at eye height and face along their carrier's motion.
+  function sampleCamera(compiled, t) {
+    const cam = compiled.camera;
+    if (!cam || !cam.pos.length || t < cam.pos[0].t0) return null;
+    const byName = new Map(compiled.objects.map((o) => [o.name, o]));
+    const map = poseAt(compiled, t);
+    const eyeOf = (name, m) => {
+      const o = (m || map).get(name);
+      const src = byName.get(name);
+      const eyeY = src && src.person ? src.person.h * 0.87 : o.bboxOff ? o.bboxOff[1] : 0;
+      return [o.pos[0], o.pos[1] + eyeY, o.pos[2]];
+    };
+    let p = null;
+    let mount = null;
+    let mountHorizon = -1; // most recent mount start ≤ t — aim history restarts there
+    for (const s of cam.pos) {
+      if (t < s.t0) break;
+      if (s.kind === "mount") {
+        p = eyeOf(s.ref);
+        mount = s.ref;
+        mountHorizon = s.t0;
+      } else {
+        mount = null;
+        let f = s.fromPos;
+        if (f.mountRef) f = eyeOf(f.mountRef, poseAt(compiled, s.t0));
+        if (t >= s.t1) p = s.to;
+        else {
+          const k = EASES[s.ease]((t - s.t0) / (s.t1 - s.t0));
+          p = [f[0] + (s.to[0] - f[0]) * k, f[1] + (s.to[1] - f[1]) * k, f[2] + (s.to[2] - f[2]) * k];
+        }
+      }
+    }
+    // aim: the governing look segment (a name tracks live; a compass is
+    // a direction from wherever the camera is), else the carrier's
+    // facing when mounted, else the scene origin
+    const lookPoint = (s) => {
+      if (s.ref) {
+        const o = map.get(s.ref);
+        return [o.pos[0] + (o.bboxOff ? o.bboxOff[0] : 0), o.pos[1] + (o.bboxOff ? o.bboxOff[1] : 0), o.pos[2] + (o.bboxOff ? o.bboxOff[2] : 0)];
+      }
+      if (s.dir) return [p[0] + s.dir[0] * 10, p[1] + s.dir[1] * 10, p[2] + s.dir[2] * 10];
+      return s.at;
+    };
+    let active = null;
+    let prev = null;
+    for (const s of cam.look) {
+      if (t < s.t0) break;
+      // a mount is an aim HORIZON: looks declared before it never
+      // apply at or after it — not while mounted (the approach dolly's
+      // look(holmes) must not leave the mounted camera staring down
+      // its own body) and not on the way out (the pull-back must not
+      // lerp FROM that stale aim either). Aim history restarts at the
+      // mount; a look declared at or after it wins normally.
+      if (s.t0 < mountHorizon) continue;
+      prev = active;
+      active = s;
+    }
+    let lk;
+    if (active) {
+      const cur = lookPoint(active);
+      if (prev && t < active.t1 && active.t1 > active.t0) {
+        const pv = lookPoint(prev);
+        const k = EASES[active.ease]((t - active.t0) / (active.t1 - active.t0));
+        lk = [pv[0] + (cur[0] - pv[0]) * k, pv[1] + (cur[1] - pv[1]) * k, pv[2] + (cur[2] - pv[2]) * k];
+      } else lk = cur;
+    } else if (mount) {
+      // face along the carrier's motion: the active or most recent move
+      // segment's direction; a never-moved carrier faces its rotation
+      const src = byName.get(mount);
+      let dir = null;
+      if (src && src.track) {
+        for (const s of src.track.move) {
+          if (s.t0 > t) break;
+          if (s.orbit || !s.from || !s.to) continue;
+          const d = [s.to[0] - s.from[0], s.to[1] - s.from[1], s.to[2] - s.from[2]];
+          if (Math.hypot(d[0], d[1], d[2]) > 1e-9) dir = d;
+        }
+      }
+      if (!dir) dir = matVec(eulerToMat((src && src.rot) || [0, 0, 0]), [0, 0, -1]);
+      const len = Math.hypot(dir[0], dir[1], dir[2]);
+      lk = [p[0] + (dir[0] / len) * 10, p[1] + (dir[1] / len) * 10, p[2] + (dir[2] / len) * 10];
+    } else {
+      lk = [0, 0.5, 0];
+    }
+    return { pos: p, look: lk, mount };
   }
 
   // Value of one channel at time t: base before the first segment,
@@ -2876,10 +3278,14 @@
         if (holder.possession) deriveHeld(holder.name);
         const h = out.get(holder.name);
         const m = eulerToMat(h.rot);
+        // concealed = at the holder's BOUNDS center, not frame origin —
+        // a person group's origin is at their feet; the pocket is at
+        // the chest (plain shapes: bboxOff is zero, nothing changes)
+        const bOff = holder.bboxOff ? matVec(m, holder.bboxOff) : [0, 0, 0];
         const off = matVec(m, iv.off);
         out.set(name, {
           ...p,
-          pos: [h.pos[0] + off[0] + extra[0], h.pos[1] + off[1] + extra[1], h.pos[2] + off[2] + extra[2]],
+          pos: [h.pos[0] + bOff[0] + off[0] + extra[0], h.pos[1] + bOff[1] + off[1] + extra[1], h.pos[2] + bOff[2] + off[2] + extra[2]],
           rot: h.rot,
           present: p.present && h.present,
           // the full holder chain at this instant, nearest first — the
@@ -2979,6 +3385,19 @@
       min: [o.pos[0] - hw, o.pos[1] - hh, o.pos[2] - hd],
       max: [o.pos[0] + hw, o.pos[1] + hh, o.pos[2] + hd],
     };
+  }
+
+  // Contact: no axis separated by more than a hair — exact face/edge
+  // contact counts, interpenetration counts (touching conductors
+  // conduct either way), a visible gap does not. The complement of
+  // overlaps' strictness: overlaps excludes touching, touches includes
+  // overlapping.
+  const TOUCH_EPS = 1e-4;
+  function boxesTouch(A, B) {
+    for (let i = 0; i < 3; i++) {
+      if (A.min[i] - B.max[i] > TOUCH_EPS || B.min[i] - A.max[i] > TOUCH_EPS) return false;
+    }
+    return true;
   }
 
   // Strict overlap: objects merely touching (resting on) do not overlap.
@@ -3143,6 +3562,7 @@
     // carries(a b): a holds b at this instant, through any chain —
     // possession data, not geometry (poseAt stamps the holder chain)
     if (fn === "carries") return !!(b.carriedBy && b.carriedBy.includes(a.name));
+    if (fn === "touches") return boxesTouch(eng.boundsOf(a), eng.boundsOf(b));
     return !eng.anyBlocker(eng.centerOf(a), eng.centerOf(b), a, b);
   }
 
@@ -3270,6 +3690,10 @@
           result.value = !!(b.carriedBy && b.carriedBy.includes(a.name));
           result.text = `${label} → ${result.value}`;
           break;
+        case "touches":
+          result.value = boxesTouch(boundsOf(a), boundsOf(b));
+          result.text = `${label} → ${result.value}`;
+          break;
         case "in":
           result.value = centerInside(a, b, { centerOf, boundsOf });
           result.text = `${label} → ${result.value}`;
@@ -3333,13 +3757,15 @@
       for (let p = o.parent; p; ) {
         const po = byName.get(p);
         if (!po) return false;
-        if (po.room || po.tube) return true;
+        if (po.room || po.tube || po.person) return true;
         p = po.parent;
       }
       return false;
     };
+    // person groups ARE movers (facts speak "bob", not "bob-head" —
+    // their members are excluded above, like room walls)
     const movers = compiled.objects.filter(
-      (o) => !o.room && o.shape !== "group" && o.shape !== "marker" && o.shape !== "link" && !partOfStructure(o),
+      (o) => !o.room && (o.shape !== "group" || o.person) && o.shape !== "marker" && o.shape !== "link" && !partOfStructure(o),
     );
 
     // sight facts are exported for SET MEMBERS only — the cast you've
@@ -3348,9 +3774,11 @@
     const castAll = [...new Set([...compiled.sets.values()].flat())]
       .map((n) => byName.get(n))
       .filter((o) => o && o.shape !== "marker");
-    // sight pairs: shapes only; order admits groups too (rooms in a
-    // set get left_of facts — the zebra houses)
-    const cast = castAll.filter((o) => o.shape !== "group");
+    // sight pairs: shapes only — except person groups, whose union
+    // center is a chest-height endpoint the sees() machinery already
+    // handles; order admits groups too (rooms in a set get left_of
+    // facts — the zebra houses)
+    const cast = castAll.filter((o) => o.shape !== "group" || o.person);
     const castPairs = [];
     for (let i = 0; i < cast.length; i++) {
       for (let j = i + 1; j < cast.length; j++) castPairs.push([cast[i], cast[j]]);
@@ -3358,6 +3786,7 @@
 
     const whereabouts = [];
     const visible = [];
+    const touching = [];
     if ((rooms.length && movers.length) || castPairs.length) {
       // one shared grid (segment boundaries + lifetime events + sweep),
       // one pose pass per grid time — facts are grid-resolution, like
@@ -3408,6 +3837,10 @@
         }
         for (const [a, b] of castPairs) {
           track(a.name + "@" + b.name, pairTruth("sees", map.get(a.name), map.get(b.name), eng), t);
+          // contact facts share the same pairs and grid: face-to-face
+          // or overlapping = in contact (the circuit's conductivity,
+          // the ladder against the window)
+          track(a.name + "~" + b.name, pairTruth("touches", map.get(a.name), map.get(b.name), eng), t);
         }
       }
       for (const [key, t0] of open) {
@@ -3424,6 +3857,8 @@
       for (const [a, b] of castPairs) {
         const rs = ranges.get(a.name + "@" + b.name);
         if (rs) visible.push({ a: a.name, b: b.name, ranges: rounded(rs) });
+        const ts2 = ranges.get(a.name + "~" + b.name);
+        if (ts2) touching.push({ a: a.name, b: b.name, ranges: rounded(ts2) });
       }
     }
 
@@ -3465,6 +3900,7 @@
         .map((o) => ({ name: o.name, appear: o.appear, vanish: o.vanish })),
       whereabouts,
       visible,
+      touches: touching,
       leftOf,
       has,
     };
@@ -3498,6 +3934,13 @@
       for (const [t0, t1] of v.ranges) {
         lines.push(`visible(${atom(v.a)}, ${atom(v.b)}, ${t0}, ${t1}).`);
         lines.push(`visible(${atom(v.b)}, ${atom(v.a)}, ${t0}, ${t1}).`);
+      }
+    }
+    for (const v of f.touches || []) {
+      // contact is symmetric; closed here so rules stay trivial
+      for (const [t0, t1] of v.ranges) {
+        lines.push(`touches(${atom(v.a)}, ${atom(v.b)}, ${t0}, ${t1}).`);
+        lines.push(`touches(${atom(v.b)}, ${atom(v.a)}, ${t0}, ${t1}).`);
       }
     }
     for (const [a, b] of f.leftOf || []) {
@@ -3749,7 +4192,7 @@
   // ------------------------------------------------------------------- API
 
   function compile(src) {
-    const { objects, queries, anims, events, errors, sets, goals, theme, view, clock, times, hypotheses, active, parts } = parse(src);
+    const { objects, queries, anims, events, errors, sets, goals, statements, cameras, theme, view, clock, times, hypotheses, active, parts } = parse(src);
     expandRepeats(objects, anims, queries, errors);
     resolveAll(objects, errors);
     const adjacency = carveDoors(objects, errors);
@@ -3780,7 +4223,16 @@
       setMap.set(s.name, s.members.slice());
     }
 
-    const compiled = { objects: [...objects.values()], queries, duration, errors, theme, view, clock, times, adjacency, goals, hypotheses, active, parts, sets: setMap };
+    // statement speakers must exist — a typo'd speaker would silently
+    // drop out of the liar certificate
+    for (const st of statements) {
+      if (!objects.has(st.speaker)) {
+        errors.push({ line: st.line, msg: `statement: no object named "${st.speaker}"` });
+      }
+    }
+
+    const compiled = { objects: [...objects.values()], queries, duration, errors, theme, view, clock, times, adjacency, goals, statements, hypotheses, active, parts, sets: setMap };
+    compiled.camera = buildCamera(objects, cameras, errors); // projection only — after resolution, before nothing
     resolveDrops(compiled); // freeze drop points before anything samples poses
     evalAdjacents(compiled, errors); // failed adjacency checks are compile errors
     evalTemporal(compiled, errors); // failed checks are compile errors
@@ -3790,7 +4242,7 @@
     return compiled;
   }
 
-  const Schauplatz = { compile, sample, prolog: prologFacts, version: "0.40.0" };
+  const Schauplatz = { compile, sample, sampleCamera, prolog: prologFacts, version: "0.45.0" };
 
   if (typeof module !== "undefined" && module.exports) module.exports = Schauplatz;
   global.Schauplatz = Schauplatz;

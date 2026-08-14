@@ -652,13 +652,32 @@ let goalGen = 0;
 function runGoals(compiled) {
   const el = document.getElementById("goal-lines");
   if (!el) return;
-  const goals = compiled.goals || [];
+  // statements become derived lines: each claim's truth in THIS world,
+  // then the assembled liar certificate — declared once, run against
+  const stmts = (compiled.statements || []).filter((s) =>
+    (compiled.objects || []).some((o) => o.name === s.speaker));
+  const items = (compiled.goals || []).map((g) => ({ ...g, kind: "goal", label: `?- ${g.goal}` }));
+  for (const s of stmts) {
+    items.push({ kind: "stmt", goal: `(${s.claim})`, line: s.line, label: `${s.speaker}: ${s.claim}` });
+  }
+  if (stmts.length) {
+    const speakers = [...new Set(stmts.map((s) => s.speaker))];
+    const cert = `member(Killer, [${speakers.join(", ")}]), ` +
+      stmts.map((s) => `testimony(Killer, ${s.speaker}, (${s.claim}))`).join(", ");
+    items.push({ kind: "cert", goal: cert, line: stmts[0].line, label: "statements — exactly one liar" });
+  }
   const gen = ++goalGen;
-  if (!goals.length) { el.innerHTML = ""; return; }
+  if (!items.length) { el.innerHTML = ""; return; }
 
   // goal lint: a misspelled atom doesn't error, it just answers "no" —
   // flag any atom that matches nothing in the scene or the rules
-  const vocab = new Set(["true", "fail", "false", "not", "inf", "nan"]);
+  const vocab = new Set(["true", "fail", "false", "not", "inf", "nan", "assert", "asserta", "assertz", "retract"]);
+  // an assert IS a definition: its predicate joins the vocabulary, so
+  // the scene-side rule idiom (assertz a rule, use it in later goals)
+  // lints clean — while a typo of that predicate elsewhere still warns
+  for (const g of compiled.goals || []) {
+    for (const m of g.goal.matchAll(/assert[az]?\(\(?\s*([a-z]\w*)\s*\(/g)) vocab.add(m[1]);
+  }
   for (const o of compiled.objects || []) vocab.add(o.name);
   if (compiled.sets) for (const [s, members] of compiled.sets) { vocab.add(s); members.forEach((m) => vocab.add(m)); }
   if (compiled.times) for (const n of compiled.times.keys()) vocab.add(n);
@@ -674,34 +693,34 @@ function runGoals(compiled) {
       : "";
   };
   const line = (g, text, cls) =>
-    `<div class="${cls || "goal"}" data-line="${g.line}">?- ${g.goal} ${text}${lintOf(g)}</div>`;
+    `<div class="${cls || "goal"}" data-line="${g.line}">${g.label} ${text}${lintOf(g)}</div>`;
   if (typeof pl === "undefined") {
-    el.innerHTML = goals.map((g) => line(g, "— Prolog engine unavailable (CDN)", "error")).join("");
+    el.innerHTML = items.map((g) => line(g, "— Prolog engine unavailable (CDN)", "error")).join("");
     return;
   }
   if (rulesText === null) {
-    el.innerHTML = goals.map((g) => line(g, "— loading rules…")).join("");
+    el.innerHTML = items.map((g) => line(g, "— loading rules…")).join("");
     return; // re-run when rules.pl arrives
   }
   if (rulesText === "") {
-    el.innerHTML = goals.map((g) => line(g, "— couldn't load rules.pl (serve over HTTP)", "error")).join("");
+    el.innerHTML = items.map((g) => line(g, "— couldn't load rules.pl (serve over HTTP)", "error")).join("");
     return;
   }
   const session = pl.create(100000);
   const program = Schauplatz.prolog(compiled) + "\n" + rulesText;
-  const texts = goals.map((g) => line(g, "…"));
+  const texts = items.map((g) => line(g, "…"));
   const paint = () => { if (gen === goalGen) el.innerHTML = texts.join(""); };
   paint(); // pending state immediately — answers land as each goal finishes
   session.consult(program, {
     success: () => askGoal(0),
     error: (err) => {
-      texts.forEach((_, i) => (texts[i] = line(goals[i], `— rules didn't load: ${err}`, "error")));
+      texts.forEach((_, i) => (texts[i] = line(items[i], `— rules didn't load: ${err}`, "error")));
       paint();
     },
   });
   function askGoal(i) {
-    if (gen !== goalGen || i >= goals.length) return;
-    const g = goals[i];
+    if (gen !== goalGen || i >= items.length) return;
+    const g = items[i];
     const answers = [];
     session.query(g.goal + ".", {
       success: () => step(),
@@ -726,6 +745,20 @@ function runGoals(compiled) {
     }
     function finish() {
       const n = answers.length;
+      if (g.kind === "stmt") {
+        // a claim's truth in this world — a false statement is not an
+        // error, it's the lie the certificate is looking for
+        texts[i] = line(g, `→ ${n > 0}`, "goal");
+        paint();
+        askGoal(i + 1);
+        return;
+      }
+      if (g.kind === "cert" && n === 0) {
+        texts[i] = line(g, "→ no — this world has no single liar (check the false statements above)", "goal");
+        paint();
+        askGoal(i + 1);
+        return;
+      }
       if (n <= 1) {
         texts[i] = line(g, n === 0 ? "→ no" : `→ ${answers[0]}`, n === 1 ? "goal goal-sole" : "goal");
       } else {
@@ -963,6 +996,23 @@ const SCENE_THEMES = {
     shadowOpacity: 0.22,
     palette: ["#8a8d94", "#6e7178", "#9a9489", "#7d8087", "#8f8a80", "#767a80"],
     material: { kind: "standard", roughness: 0.5 },
+    outline: 0,
+    edges: null,
+  },
+  // street level: hazy daylight over a lit asphalt lot — bus stops,
+  // airports, parking lots, crime scenes with chalk lines. Crisp
+  // daytime shadows, signal-paint palette (transit yellow, bus red,
+  // sign blue) against matte concrete greys
+  asphalt: {
+    bg: 0xc2cdd6,
+    ground: 0x3d4045,
+    hemi: { sky: 0xf2f6fa, ground: 0x565b61, intensity: 1.2 },
+    sun: { color: 0xfff4e2, intensity: 1.5, pos: [7, 12, 5] },
+    rim: { color: 0xc9d4e0, intensity: 0.35, pos: [-8, 9, -6] },
+    grid: { big: 0x555b63, small: 0x494e55 }, // pavement joints
+    shadowOpacity: 0.2, // unused while ground is opaque; kept for symmetry
+    palette: ["#e8b73a", "#c94f3d", "#2f6db5", "#9aa2a8", "#e07b2f", "#4f8f6a"],
+    material: { kind: "standard", roughness: 0.8 },
     outline: 0,
     edges: null,
   },
@@ -1206,6 +1256,7 @@ let ringMat = null; // shared by all selection rings, rebuilt per compile
 window.onCompiled = function (c) {
   compiled = c;
   lastResultsText = null;
+  cameraFree = false; // recompile hands the wheel back to the script
   const themeName = c.theme && SCENE_THEMES[c.theme] ? c.theme : "default";
   // the core no longer validates theme names (custom themes exist) —
   // the warning lives here, where the theme list actually is
@@ -1390,7 +1441,34 @@ function applyTime() {
     lastResultsText = text;
     renderResults(s.results);
   }
+
+  // scripted camera: sampleCamera drives position and aim; grabbing the
+  // viewport hands control back (cameraFree, reset on recompile). A
+  // mounted camera hides its carrier — you look THROUGH bob, not at
+  // the inside of his head.
+  const cam = !cameraFree && compiled.camera ? Schauplatz.sampleCamera(compiled, animT) : null;
+  if (cam) {
+    camera.position.set(cam.pos[0], cam.pos[1], cam.pos[2]);
+    camera.lookAt(cam.look[0], cam.look[1], cam.look[2]);
+    controls.enabled = false;
+  } else {
+    controls.enabled = true;
+  }
+  // per-frame: the object loop above re-asserted presence, so hiding
+  // the carrier here needs no state or restore pass
+  if (cam && cam.mount) {
+    for (const o of compiled.objects) {
+      if (o.name !== cam.mount && o.parent !== cam.mount) continue;
+      const mesh = meshes.get(o.name);
+      if (mesh) mesh.visible = false;
+    }
+  }
 }
+
+let cameraFree = false;
+renderer.domElement.addEventListener("pointerdown", () => {
+  if (compiled && compiled.camera && !cameraFree) cameraFree = true; // grab = take the wheel
+});
 
 // ------------------------------------------------------------- hover names
 const raycaster = new THREE.Raycaster();
@@ -1423,7 +1501,15 @@ renderer.domElement.addEventListener("pointermove", (e) => {
       const iv = o.possession.intervals.find((v) => animT >= v.t0 && (v.t1 === null || animT < v.t1));
       return iv ? iv.holder : null;
     };
-    const hn = hovered.userData.name;
+    let hn = hovered.userData.name;
+    // a person's meshes are their body/head members — hovering either
+    // means the person: resolve to the group so possession (held by
+    // the group's name) and the label both speak "bob", not "bob-head"
+    const part = (latest.objects || []).find((o) => o.name === hn);
+    if (part && part.parent) {
+      const par = (latest.objects || []).find((o) => o.name === part.parent);
+      if (par && par.person) hn = par.name;
+    }
     let label = hn;
     const ho = (latest.objects || []).find((o) => o.name === hn);
     const holds = (latest.objects || []).filter((o) => holderNow(o) === hn).map((o) => o.name);

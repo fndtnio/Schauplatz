@@ -8,6 +8,7 @@
   "piston.scene",
   "timing.scene",
   "orbit.scene",
+  "camera-tour.scene",
   "traffic-light.scene",
   "rooms.scene",
   "coins.scene",
@@ -23,6 +24,7 @@
   "locked-manor.scene",
   "prolog-1-facts.scene",
   "prolog-2-rules.scene",
+  "prolog-4-circuits.scene",
   "template-murdle.scene",
   "template-murdle-liars.scene",
   "template-mystery.scene"

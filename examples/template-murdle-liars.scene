@@ -1,12 +1,15 @@
 // MURDLE — starter template (later chapters: suspect statements,
 // the murderer always lies)
 //
-// Everything from the plain template, plus: each statement becomes a
-// PAIR of hypothesis blocks (its true-world and its false-world, each
-// carrying that branch's consequences), and the active line composes
-// your current theory — one _false, the rest _true. The testimony
-// certificate at the bottom confirms your liar is the only consistent
-// one. Solved = checks green, goals bound, testimony sole.
+// Everything from the plain template, plus the statement machinery:
+//   statement <speaker> <claim>   — the testimony, declared ONCE
+// The panel shows each claim's truth in the current world, and
+// assembles the liar certificate automatically: exactly one speaker's
+// claim false = the murderer, derived. Each statement also gets a
+// PAIR of hypothesis blocks (its true-world and false-world
+// CONSEQUENCES), and the active line composes your theory — one
+// _false, the rest _true. Solved = checks green, goals bound,
+// certificate sole.
 theme paper
 view top
 time found 0
@@ -20,14 +23,14 @@ room room_three west-of(room_two) color(tan)
 end
 
 //victim: found in ___ — write it down before the clues
-cylinder body r(0.25) h(1.6) at(unknown 3.5 1.5) color(grey)
+person body at(unknown 3.5 .6) color(grey)
 turn body to(90 0 0) over(0)
 //walk body to(room_one) over(0)
 
 set suspects
-cylinder suspect_one r(0.25) h(1.6) at(unknown -3 -1) color(firebrick)
-cylinder suspect_two r(0.25) h(1.6) at(unknown -2 -1) color(steelblue)
-cylinder suspect_three r(0.25) h(1.6) at(unknown -1 -1) color(seagreen)
+person suspect_one at(unknown -3 -1) color(firebrick)
+person suspect_two at(unknown -2 -1) color(steelblue)
+person suspect_three at(unknown -1 -1) color(seagreen)
 end
 
 set weapons
@@ -40,15 +43,25 @@ end
 // gates that can go red, or pair_up constraints — see template-murdle
 
 // ---- STATEMENTS ------------------------------------------------------
-// transcribe each statement's LITERAL content as a comment first —
-// what it claims about the world, not who it implicates. Then give it
-// a true-block and a false-block with that branch's consequences.
+// declare each statement ONCE: speaker + the LITERAL claim (goal
+// syntax — what the words assert about the world, not who they
+// implicate). The panel shows each claim's truth live, and derives
+// "exactly one liar" below your goals — no certificate to hand-write.
+// Replace these placeholders with your puzzle's statements:
+
+statement suspect_one \+ present_at(suspect_one, room_one, 0)
+statement suspect_two \+ present_at(weapon_one, room_two, 0)
+statement suspect_three present_at(weapon_two, room_one, 0)
+
+// each statement still gets its PAIR of hypothesis blocks — the
+// true-world and false-world CONSEQUENCES are yours to model
+// (a claim's truth is derived; what it FORCES is deduction):
 
 hypothesis one_true
-// suspect_one: "..."  — what follows if this holds?
+// suspect_one's claim holds — what follows? place people, take things
 end
 hypothesis one_false
-// the negation — what follows? (lies are informative)
+// the negation holds — what follows? (lies are informative)
 end
 
 hypothesis two_true
@@ -62,22 +75,15 @@ hypothesis three_false
 end
 
 // your theory: one liar, everyone else truthful. Swap and recompile —
-// each selection is one world; the checks kill the impossible ones.
+// each selection is one world; the checks kill the impossible ones,
+// and the statement panel shows exactly one false claim when your
+// world is consistent.
 active one_true two_true three_true
 
 // ---- CERTIFICATES — green + bound = solved ---------------------------
 ?- pair_up_scene(suspects, weapons, [], P)
 ?- one_each(suspects, rooms, found)
 ?- one_each(weapons, rooms, found)
-
-// the LIAR certificate — replace each claim with the statement's
-// literal content (present_at / \+ present_at over people, weapons,
-// rooms). set_member generates candidates; exactly the murderer's
-// claim must be false. Sole answer = your killer, derived.
-//?- set_member(suspects, Killer),
-//   testimony(Killer, suspect_one, present_at(suspect_one, room_one, 0)),
-//   testimony(Killer, suspect_two, \+ present_at(weapon_one, room_two, 0)),
-//   testimony(Killer, suspect_three, present_at(weapon_two, room_one, 0))
 
 // the full verdict adds geometry: the liar is AT the scene
 //?- where(body, found, R), exactly_one(suspects, R, found, Killer),

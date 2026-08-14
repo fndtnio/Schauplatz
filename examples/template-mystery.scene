@@ -19,13 +19,13 @@ room room_two west-of(room_one) door(to room_one) color(coral)
 room room_three west-of(room_two) door(to room_two) color(tan)
 
 //victim: found in ___ at ___
-cylinder body r(0.25) h(1.6) at(unknown 3.5 1.5) color(grey)
+person body at(unknown 3.5 1.5) color(grey)
 turn body to(90 0 0) over(0)
 
 set suspects
-cylinder suspect_one r(0.25) h(1.6) at(unknown -3 -1) color(firebrick)
-cylinder suspect_two r(0.25) h(1.6) at(unknown -2 -1) color(steelblue)
-cylinder suspect_three r(0.25) h(1.6) at(unknown -1 -1) color(seagreen)
+person suspect_one at(unknown -3 -1) color(firebrick)
+person suspect_two at(unknown -2 -1) color(steelblue)
+person suspect_three at(unknown -1 -1) color(seagreen)
 end
 
 // ---- TESTIMONY -------------------------------------------------------

@@ -1,0 +1,75 @@
+// Prolog 4 — structure and recursion: circuits
+//
+// The classic Prolog circuits lesson, inverted: instead of nested
+// terms DESCRIBING an invisible circuit, we build a visible one and
+// let the facts fall out of geometry. Contact is a fact the scene
+// derives — press the facts button and find touches(blade_s, wire_s2,
+// 0, 2.21): two conductors, in contact, with a time interval.
+//
+// The rules layer defines conductivity as RECURSION over contact
+// (see rules.pl):
+//   reaches(A, B, T) :- ...touches_at(A, B, T)... or a chain of them
+// One rule, any circuit. Series and parallel are not term structure
+// here — they are LAYOUT. Look at the scene: the series circuit is
+// one chain; the parallel circuit is two visible paths.
+
+time closed 1
+time opened 4
+
+// ---- the SERIES circuit (north lane): one path, one point of failure
+set circuit_s battery_s wire_s1 blade_s wire_s2 bulb_s
+box battery_s size(0.6 0.6 0.6) at(0.3 0.3 2) color(#c0392b)
+box wire_s1 size(1 0.1 0.2) at(1.1 0.05 2) color(#7f8c8d)
+box blade_s size(0.8 0.1 0.2) at(2 0.05 2) color(#b8860b)
+box wire_s2 size(1 0.1 0.2) at(2.9 0.05 2) color(#7f8c8d)
+sphere bulb_s r(0.25) at(3.65 0.25 2) color(#f4d03f)
+
+// ---- the PARALLEL circuit (south lane): two paths share the load
+set circuit_p battery_p junction wire_p blade_p collector bulb_p
+box battery_p size(0.6 0.6 0.6) at(0.3 0.3 -2) color(#c0392b)
+box junction size(0.2 0.2 1.8) at(0.7 0.1 -2) color(#7f8c8d)
+box wire_p size(1.4 0.1 0.2) at(1.5 0.05 -1.2) color(#7f8c8d)
+box blade_p size(1.4 0.1 0.2) at(1.5 0.05 -2.8) color(#b8860b)
+box collector size(0.2 0.2 1.8) at(2.3 0.1 -2) color(#7f8c8d)
+sphere bulb_p r(0.25) at(2.65 0.25 -2) color(#f4d03f)
+
+// at t=2 both switch blades swing open — 90° up, a real physical gap
+turn blade_s to(0 0 90) over(0.5) start(2)
+turn blade_p to(0 0 90) over(0.5) start(2)
+// the series bulb dies with its only path; the paint is the author
+// AGREEING with the engine (see the reaches goals below) — color is
+// projection, the derivation is the fact
+paint bulb_s to(#4a4a42) start(2.5)
+
+// ---- the LIVE layer: these follow the scrubber — drag it
+? touches(blade_s wire_s2)
+? when touches(blade_s wire_s2)
+check ever touches(blade_s wire_s2)
+check never touches(blade_s wire_s2) during(3 4)
+
+// ---- the RULES layer: recursion over contact facts, time explicit.
+// Variables unify across the chain: reaches walks touches_at links
+// the way Prolog walks any relation — this is the same machinery as
+// could_be_at and testimony, pointed at electricity.
+?- reaches(battery_s, bulb_s, closed)
+?- reaches(battery_s, bulb_s, opened)
+?- reaches(battery_p, bulb_p, opened)
+?- reaches_set(battery_p, opened, Xs)
+
+// series: lit, then dead. parallel: lit BOTH times — one branch broke,
+// the other carried it. No clause says "parallel is redundant";
+// redundancy is derived from the shape of the world.
+
+// ---- the same circuit, unplugged --------------------------------------
+// In pure Prolog you would write the structure as nested terms and
+// teach unification against them — no world, no time, no gap to see:
+//
+//   conducts(wire).
+//   conducts(switch(closed)).          % no clause for switch(open)
+//   conducts(series(A, B))   :- conducts(A), conducts(B).
+//   conducts(parallel(A, _)) :- conducts(A).
+//   conducts(parallel(_, B)) :- conducts(B).
+//
+// Same lesson, no body. Here the structure is the scene, the terms
+// are facts derived from geometry, and "when is it lit" is a question
+// the pure version cannot even ask.

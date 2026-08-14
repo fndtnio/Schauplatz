@@ -1,0 +1,31 @@
+// The scripted camera: a scene that TELLS itself.
+//
+// camera statements are a projection channel with the animation
+// grammar — to() dollies (over(0) is a cut), from() mounts the camera
+// on someone (first person), look() aims (a name tracks; compass
+// words work). Zero semantic effect: the camera has no bounds, blocks
+// no sight line, appears in no fact. Grab the viewport to take the
+// wheel; recompile to hand it back.
+theme noir
+clock 3:00 minute(2)
+
+room study size(5 2.5 4) door(to hall) color(#4a4640)
+room hall size(3 2.5 4) east-of(study) color(#3d4045)
+
+person holmes at(hall 0.5 0) color(#5a6b7d)
+box desk size(1.6 0.8 0.8) at(study -1 -1) color(#6b5a45)
+box candle size(0.1 0.3 0.1) on(desk) color(#c9a227)
+
+// the action: holmes crosses the hall and enters the study
+walk holmes to(study-hall-door) over(3) start(3:01)
+walk holmes to(study 0.5 0.5) over(2)
+
+// the telling: establish wide on holmes, glide down into the hall
+// with him framed, ride his eyes through the door, then pull back to
+// the desk as he arrives (the pull-back ends with the timeline)
+camera to(4 6 8) over(0) look(holmes)
+camera to(hall 0 0.4 1.6) start(0.8) over(1.2) ease(in-out) look(holmes)
+camera from(holmes) start(3:01)
+camera to(study -1 1.6 2.4) start(5.5) over(1.5) ease(out) look(desk)
+
+? sees(holmes candle)

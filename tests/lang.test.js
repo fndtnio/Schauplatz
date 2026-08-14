@@ -2338,6 +2338,41 @@ porter p scale(2)`);
   assert.deepEqual(s["p-case"].heldBy.off, [1, 0, 0]);
 });
 
+test("wear anchors: the scarf sits at the neck, visible, and scales with the person", () => {
+  const c = compile(`person bob at(0 0)
+box scarf size(0.3 0.05 0.2) held-by(bob neck)
+sphere eye r(0.1) at(0 1.3 -6)
+? sees(eye scarf)`);
+  assert.deepEqual(c.errors, []);
+  const scarf = sample(c, 0).objects.find((o) => o.name === "scarf");
+  const bodyH = 1.7 - 2 * 0.11 * 1.7;
+  assert.ok(Math.abs(scarf.pos[1] - bodyH) < 1e-9); // top of the body: the neck
+  assert.ok(scarf.pos[2] < 0); // front surface — worn, not buried
+  assert.equal(c.results[0].value, true); // and honestly SEEABLE, unlike a pocketed one
+  // a scaled person wears at scaled height
+  const tall = compile(`person giant h(3.4) at(0 0)
+box hat size(0.4 0.15 0.4) held-by(giant head)`);
+  const hat = sample(tall, 0).objects.find((o) => o.name === "hat");
+  assert.ok(Math.abs(hat.pos[1] - 3.4) < 1e-9); // at the crown
+});
+
+test("wear anchors ride rotation, work in take off(), and guard non-persons", () => {
+  const c = compile(`person bob at(0 0) rotate(0 180 0)
+box badge size(0.1 0.1 0.02) held-by(bob chest)`);
+  const badge = sample(c, 0).objects.find((o) => o.name === "badge");
+  assert.ok(badge.pos[2] > 0); // turned around: the chest now faces +z
+  const taken = compile(`person cop at(0 0)
+box lantern size(0.15 0.25 0.15) at(3 0)
+take cop lantern at(1) off(hand)`);
+  assert.deepEqual(taken.errors, []);
+  const lantern = sample(taken, 2).objects.find((o) => o.name === "lantern");
+  assert.ok(Math.abs(lantern.pos[0]) > 0.2); // carried at the side, not concealed
+  assert.match(errorsOf(`box crate size(1 1 1)
+box tag size(0.1 0.1 0.02) held-by(crate neck)`)[0], /isn't a person — anchors are anatomy/);
+  assert.match(errorsOf(`person bob
+box thing held-by(bob nose)`)[0], /unknown anchor "nose"/);
+});
+
 test("held things can be painted, but not moved", () => {
   const ok = compile(`box guy size(1 2 1)
 box token size(0.2 0.2 0.2) color(gray) held-by(guy)
@@ -2515,6 +2550,250 @@ take oak snake at(1)
   assert.deepEqual(c.errors, []);
   const q = c.queries.find((q2) => q2.temp);
   assert.match(q.temp.text, /true \(oak\)/);
+});
+
+// ----------------------------------------------------------------- person
+
+test("person desugars: body + head at human proportions, standing on the ground", () => {
+  const s = scene("person bob");
+  assert.equal(s.bob.shape, "group");
+  assert.equal(s.bob.person.h, 1.7);
+  const posed = sample(compile("person bob"), 0).objects;
+  const head = posed.find((o) => o.name === "bob-head");
+  const body = posed.find((o) => o.name === "bob-body");
+  assert.ok(Math.abs(head.pos[1] + head.r - 1.7) < 1e-9); // crown at full height
+  assert.ok(Math.abs(body.pos[1] - body.h / 2) < 1e-9); // feet on the ground
+  assert.equal(head.family, "bob/person"); // shared palette, no implicit set
+});
+
+test("person facts speak the name, not the parts", () => {
+  const c = compile(`clock 1:00 minute(1)
+room a size(3 2.5 3) at(0 0 0)
+room b size(3 2.5 3) east-of(a 2)
+person bob at(a)
+walk bob to(b) over(2) start(1:01)`);
+  assert.deepEqual(c.errors, []);
+  const names = [...new Set(c.facts.whereabouts.map((w) => w.name))];
+  assert.deepEqual(names, ["bob"]); // no bob-body, no bob-head
+  const rooms = c.facts.whereabouts.map((w) => w.room);
+  assert.ok(rooms.includes("a") && rooms.includes("b"));
+});
+
+test("person composes: walks, blocks sight, holds things at chest height", () => {
+  const c = compile(`room cell size(4 2.5 4)
+person guard at(cell)
+box knife size(0.1 0.3 0.05) held-by(guard)
+sphere eye r(0.1) at(0 1.5 8)
+? sees(eye knife)
+? in(knife cell)
+check always carries(guard knife)`);
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.results.find((q) => q.text.includes("sees")).value, false); // the body conceals it
+  assert.equal(c.results.find((q) => q.text.includes("in(")).value, true);
+  const knife = sample(c, 0).objects.find((o) => o.name === "knife");
+  assert.ok(knife.pos[1] > 0.5 && knife.pos[1] < 1.2); // chest, not feet
+});
+
+test("person knobs and guards: h() scales, paint hits both parts, names collide", () => {
+  const s = scene("person tall h(2)");
+  assert.equal(s["tall-body"].h + 2 * s["tall-head"].r, 2);
+  const painted = compile("person bob color(gray)\npaint bob to(red) start(1)");
+  assert.deepEqual(painted.errors, []);
+  const bodyTrack = painted.objects.find((o) => o.name === "bob-body").track;
+  const headTrack = painted.objects.find((o) => o.name === "bob-head").track;
+  assert.ok(bodyTrack.paint.length === 1 && headTrack.paint.length === 1);
+  assert.match(errorsOf("box bob-head\nperson bob")[0], /name is taken/);
+});
+
+test("person scales inside parts", () => {
+  const s = scene("part guardpost\n  person sentry\nend\nguardpost g scale(2)");
+  assert.equal(s["g-sentry"].person.h, 3.4);
+  assert.ok(Math.abs(s["g-sentry-body"].r - 0.15 * 1.7 * 2) < 1e-9);
+});
+
+// ----------------------------------------------------------------- touches
+
+test("touches: face contact true, gap false, overlap true — overlaps stays strict", () => {
+  const c = compile(`box a size(1 1 1) at(0 0)
+box b size(1 1 1) at(1 0)
+box far size(1 1 1) at(3 0)
+box sunk size(1 1 1) at(0.5 0)
+? touches(a b)
+? touches(a far)
+? touches(a sunk)
+? overlaps(a b)`);
+  assert.deepEqual(c.errors, []);
+  assert.deepEqual(c.results.map((r) => r.value), [true, false, true, false]);
+});
+
+test("touches quantifies: a blade swinging open breaks contact on the timeline", () => {
+  const c = compile(`box wire_a size(1 0.1 0.1) at(0.5 0.05 0)
+box blade size(1 0.1 0.1) at(1.5 0.05 0)
+box wire_b size(1 0.1 0.1) at(2.5 0.05 0)
+turn blade to(0 0 90) over(0.5) start(2)
+? when touches(blade wire_b)
+check ever touches(blade wire_b)
+check never touches(blade wire_b) during(3 4)`);
+  assert.deepEqual(c.errors, []);
+  const q = c.queries.find((q2) => q2.temp && !q2.check);
+  assert.match(q.temp.text, /0\.00–2\./); // in contact until the swing clears
+});
+
+test("touches facts export as symmetric intervals, set members only", () => {
+  const c = compile(`set circuit blade wire_b
+box wire_a size(1 0.1 0.1) at(0.5 0.05 0)
+box blade size(1 0.1 0.1) at(1.5 0.05 0)
+box wire_b size(1 0.1 0.1) at(2.5 0.05 0)
+turn blade to(0 0 90) over(0.5) start(2)`);
+  assert.deepEqual(c.errors, []);
+  const t = c.facts.touches;
+  assert.equal(t.length, 1); // only the pair in the set (wire_a is uncast)
+  assert.deepEqual([t[0].a, t[0].b], ["blade", "wire_b"]);
+  assert.equal(t[0].ranges[0][0], 0);
+  assert.ok(t[0].ranges[0][1] >= 2 && t[0].ranges[0][1] < 2.6); // opens mid-swing
+  const txt = prolog(c);
+  assert.match(txt, /touches\(blade, wire_b, /);
+  assert.match(txt, /touches\(wire_b, blade, /); // symmetric
+});
+
+// -------------------------------------------------------------- statements
+
+test("statement declarations parse as data, in order, dot tolerated", () => {
+  const c = compile(`person bob
+person alice at(3 0)
+statement bob present_at(bob, garden, 0).
+statement alice \\+ present_at(bob, garden, 0)`);
+  assert.deepEqual(c.errors, []);
+  assert.deepEqual(c.statements.map((s) => [s.speaker, s.claim]), [
+    ["bob", "present_at(bob, garden, 0)"],
+    ["alice", "\\+ present_at(bob, garden, 0)"],
+  ]);
+});
+
+test("statement guards: unknown speaker, at-block rejection, set-block rejection", () => {
+  assert.match(errorsOf("statement ghost foo(1)")[0], /no object named "ghost"/);
+  assert.match(errorsOf("box b\nat 1\n  statement b foo(2)\nend")[0], /only animations, queries and checks/);
+  assert.ok(errorsOf("set s\nstatement s foo(3)\nend").some((e) => /a set block encloses declarations/.test(e)));
+  assert.match(errorsOf("box b\nstatement b")[0], /expected: statement <speaker> <claim>/);
+});
+
+test("statements scope to hypothesis worlds", () => {
+  const src = (act) => `box b
+hypothesis w1
+  statement b foo(1)
+end
+hypothesis w2
+end
+active ${act}`;
+  assert.equal(compile(src("w1")).statements.length, 1);
+  assert.equal(compile(src("w2")).statements.length, 0);
+});
+
+// ------------------------------------------------------------------ camera
+
+const { sampleCamera } = require("../lang.js");
+
+test("camera: cut, dolly with ease, hold — pure projection, duration untouched", () => {
+  const c = compile(`room kitchen size(4 2.5 4)
+room parlor size(4 2.5 4) east-of(kitchen)
+box crate size(1 1 1) at(parlor 1 1)
+move crate by(0 1 0) over(2)
+camera to(kitchen) over(0)
+camera to(parlor) start(4) over(2)`);
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.duration, 2); // the camera never extends the timeline
+  assert.equal(sampleCamera(c, -1), null); // before the first segment: free camera
+  const atCut = sampleCamera(c, 0.5);
+  assert.deepEqual(atCut.pos, [0, 1.6, 0]); // eye height inside the kitchen
+  const mid = sampleCamera(c, 5);
+  assert.ok(Math.abs(mid.pos[0] - 2.2) < 1e-9); // halfway to the parlor (x=4.4)
+  const held = sampleCamera(c, 9);
+  assert.deepEqual(held.pos, [4.4, 1.6, 0]); // holds after the dolly
+});
+
+test("camera from(person): rides at eye height, faces along the walk", () => {
+  const c = compile(`room hall size(6 2.5 6)
+person bob at(-2 0)
+walk bob to(2 0) over(4)
+camera from(bob)`);
+  assert.deepEqual(c.errors, []);
+  const cam = sampleCamera(c, 2);
+  assert.ok(Math.abs(cam.pos[0] - 0) < 1e-9); // riding bob mid-walk
+  assert.ok(Math.abs(cam.pos[1] - 1.7 * 0.87) < 1e-9); // eye height
+  assert.equal(cam.mount, "bob");
+  assert.ok(cam.look[0] > cam.pos[0]); // facing +x, the walk direction
+});
+
+test("camera look: compass aims, names track their moving target", () => {
+  const c = compile(`box ball size(0.5 0.5 0.5) at(5 0)
+move ball by(0 2 0) over(2)
+camera to(0 2 8) over(0) look(north)
+camera look(ball) start(1)`);
+  assert.deepEqual(c.errors, []);
+  const north = sampleCamera(c, 0.5);
+  assert.ok(north.look[2] < north.pos[2]); // aiming -z
+  const track = sampleCamera(c, 2);
+  assert.ok(Math.abs(track.look[0] - 5) < 1e-9 && track.look[1] > 1.5); // following the ball up
+});
+
+test("camera guards: to+from conflict, unknown refs, empty statement", () => {
+  assert.match(errorsOf("box b\ncamera to(1 2 3) from(b)")[0], /a dolly or a mount/);
+  assert.match(errorsOf("camera to(ghost)")[0], /no object named "ghost"/);
+  assert.match(errorsOf("camera from(ghost)")[0], /no object named "ghost"/);
+  assert.match(errorsOf("camera start(2)")[0], /camera needs to\(\), from\(\), or look\(\)/);
+  assert.match(errorsOf("box a\nbox b at(2 0)\nlink l between(a b)\ncamera from(l)")[0], /no pose to ride/);
+});
+
+test("a mount clears the approach dolly's aim: face motion, not your own chest", () => {
+  const c = compile(`person bob at(-2 0)
+walk bob to(4 0) over(6)
+camera to(0 1 6) over(1) look(bob)
+camera from(bob) start(3)`);
+  assert.deepEqual(c.errors, []);
+  const cam = sampleCamera(c, 4);
+  assert.equal(cam.mount, "bob");
+  // aim is ahead along the walk (+x), not back at bob's own position
+  assert.ok(cam.look[0] > cam.pos[0] + 5);
+  // and a look declared AT the mount still wins
+  const c2 = compile(`person bob at(-2 0)
+box door size(1 2 0.1) at(0 1 -5)
+walk bob to(4 0) over(6)
+camera from(bob) look(door)`);
+  const cam2 = sampleCamera(c2, 3);
+  assert.ok(cam2.look[2] < cam2.pos[2]); // aimed at the door, -z
+});
+
+test("the mount is an aim horizon: the pull-back doesn't lerp from pre-mount looks", () => {
+  const c = compile(`person bob at(-2 0)
+box desk size(1 0.8 0.8) at(8 0)
+walk bob to(4 0) over(6)
+camera to(0 1 6) over(1) look(bob)
+camera from(bob) start(2)
+camera to(0 4 6) start(5) over(2) look(desk)`);
+  assert.deepEqual(c.errors, []);
+  const cam = sampleCamera(c, 5.05);
+  // just after the pull-back begins: aim is AT the desk (no lerp from
+  // the approach dolly's look(bob) — that history died at the mount)
+  assert.ok(Math.abs(cam.look[0] - 8) < 1e-9);
+});
+
+test("door(to) an OPEN room from the walled side: carves the wall, declares adjacency", () => {
+  // found working by Jeremy (2026-08-12) — pinned so it stays deliberate:
+  // the open-room guard rejects doors ON the wall-less room; declared
+  // from the walled neighbour, the carve is one-sided and the fact real
+  const c = compile(`room kitchen size(4 2.5 4) door(to garden)
+room garden size(4 2.5 4) east-of(kitchen) walls(0)
+? adjacent(kitchen garden)`);
+  assert.deepEqual(c.errors, []);
+  assert.ok(c.objects.filter((o) => o.name.startsWith("kitchen-east-")).length >= 2); // carved
+  assert.equal(c.results[0].value, true); // adjacency declared
+});
+
+test("camera chains and null before the first segment", () => {
+  const c = compile(`box b
+camera to(0 5 5) start(2) over(0)`);
+  assert.equal(sampleCamera(c, 1), null); // free camera until the script starts
+  assert.deepEqual(sampleCamera(c, 3).pos, [0, 5, 5]);
 });
 
 // ----------------------------------------------- examples are fixtures too

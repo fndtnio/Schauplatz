@@ -183,6 +183,26 @@ pair_up_scene(SetA, SetB, Cs, Pairs) :-
     append(Known, Cs, All),
     pair_up(SetA, SetB, All, Pairs).
 
+% ---- contact ---------------------------------------------------------------
+% touches(A, B, T0, T1) facts: set members in physical contact — face
+% to face, or overlapping — from the scene sweep. Symmetric. dynamic
+% keeps goals from erroring in scenes with no contact at all.
+:- dynamic(touches/4).
+touches_at(A, B, T) :- touches(A, B, T0, T1), T0 =< T, T =< T1.
+
+% reachability through contact at a named time: conductivity, dominoes,
+% train couplings. Takes a time NAME like sole/could (touches_at takes
+% raw seconds). The visited list keeps contact LOOPS (a parallel
+% circuit) from recursing forever.
+%   ?- reaches(battery, bulb, blade_open)
+reaches(A, B, TN) :- time_fact(TN, T), reach_(A, B, T, [A]).
+reach_(A, B, T, _) :- touches_at(A, B, T).
+reach_(A, C, T, V) :- touches_at(A, B, T), \+ member(B, V), reach_(B, C, T, [B|V]).
+
+% everything reachable from A, once each — "what is powered?"
+%   ?- reaches_set(battery, blade_open, Xs)
+reaches_set(A, TN, Xs) :- findall(X, reaches(A, X, TN), L), sort(L, Xs).
+
 % ---- counting --------------------------------------------------------------
 % Every room in RoomSet has exactly one member of Set — the Murdle
 % contract as a single certificate ("no room fails" — forall is spelled
