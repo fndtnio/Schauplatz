@@ -1,0 +1,158 @@
+/*
+THE RIVER CROSSING — Lewis Carroll's ferry problem, solved and CERTIFIED.
+
+A man must ferry a fox, a goose, and a bag of corn across a river.
+The boat holds the man plus one passenger. Left unattended together,
+the fox eats the goose and the goose eats the corn.
+
+The rules are written FIRST, as goals the finished scene must satisfy:
+a capacity limit on the boat and two chaperone constraints — "never
+alone together" is checked over the whole timeline, from the scene's
+own whereabouts facts. Then the plan is written as `then` beats: each
+block starts when the previous beat has finished. No clock arithmetic;
+the story is a sequence, so the text is one.
+
+The trick of the puzzle is beat 7: the goose RIDES BACK. Try the
+falsifier — delete the goose's return (beats 7 and 9's take/drop of
+the goose) and ferry the corn straight over: fox and goose end up
+alone on the north bank and both chaperone goals answer no. A plan
+that survives the compiler is a plan that survives the riverbank.
+
+One found-by-the-engine subtlety is preserved below: the man boards
+LAST. Board him with the goose and his center crosses into the river
+before the goose clears the bank — 0.24 seconds of fox-and-goose
+alone at the water's edge, and the chaperone goal catches it.
+*/
+
+theme meadow
+
+part tree
+  cylinder trunk r(0.12) h(1.1) color(#7a5a3a)
+  sphere crown r(0.75) at(0 1.7 0) color(#3f7a4a)
+  sphere crown_b r(0.55) at(0.38 1.45 0.22) color(#4a8a52)
+  sphere crown_c r(0.5) at(-0.36 1.5 -0.2) color(#37704a)
+end
+
+room river color(#4a7d9e) walls(0) size(10 4 8)
+room south_bank color(#8a6f4d) walls(0) south-of(river) size(10 2 4)
+room north_bank color(#8a6f4d) walls(0) north-of(river) size(10 2 4)
+
+tree tree_1 at(south_bank -3 0)
+tree tree_2 at(north_bank 3 0)
+
+room boat color(#7a5a3a) size(1 .5 2) floor at(river 0 3)
+
+set total_actors
+person dude at(south_bank 0 0)
+animal goose h(0.7) at(south_bank 0 1) color(#d8d0c0)
+animal fox h(0.45) at(south_bank 0 -1) color(#c05a2a)
+box corn size(0.4 0.4 0.4) at(south_bank -1 0) color(#d9b23a)
+end
+
+set fox_and_goose fox goose
+set goose_and_corn goose corn
+
+// ---- the contract, written before the plan ---------------------------
+// the boat: the man plus one passenger
+?- carries_at_most(boat, 2)
+// never alone together, anywhere, ever
+?- chaperoned(fox_and_goose, dude)
+?- chaperoned(goose_and_corn, dude)
+// and nobody swims: every crossing is a boat ride
+check ever carries(boat dude)
+check ever carries(boat goose)
+check ever carries(boat fox)
+check ever carries(boat corn)
+
+// ---- the plan: each beat starts when the last one lands --------------
+
+then
+// the goose boards first...
+walk goose to(boat)
+take boat goose off(-0.4 0.9 0)
+end
+
+then
+// ...and the man boards LAST — leave together and fox+goose are alone
+// at the water's edge while his center is already over the river
+walk dude to(boat 0.6 0)
+take boat dude off(0.5 0.9 0)
+end
+
+then 1
+// crossing 1: the goose goes over
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat goose
+end
+
+then 1
+// the man returns alone
+walk boat to(south_bank 0 -1.5)
+end
+
+then
+// crossing 2: the fox
+walk fox to(south_bank 0 -1.5)
+take boat fox off(-0.4 0.9 0)
+end
+
+then 1
+walk boat to(north_bank 0 1.5)
+end
+
+then
+// THE TRICK: deliver the fox, and the goose rides BACK
+drop boat fox
+take boat goose off(-0.4 0.9 0)
+end
+
+then 1
+walk boat to(south_bank 0 -1.5)
+end
+
+then
+// crossing 3: swap the goose for the corn
+drop boat goose
+take boat corn off(-0.4 0.9 0)
+end
+
+then 1
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat corn
+end
+
+then 1
+// last run: fetch the goose
+walk boat to(south_bank 0 -1.5)
+end
+
+then
+take boat goose off(-0.4 0.9 0)
+end
+
+then 1
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat goose
+end
+
+// ---- the last beat is the victory condition --------------------------
+then
+check in(dude north_bank)
+check in(goose north_bank)
+check in(fox north_bank)
+check in(corn north_bank)
+end
+
+// ---- the derived story (scrub and watch) -----------------------------
+? when in(goose river)
+? when carries(boat fox)
+? carries(boat total_actors)

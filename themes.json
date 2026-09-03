@@ -1,0 +1,15 @@
+{
+  "_readme": "Custom themes for the Schauplatz playground. Each entry is a theme usable as `theme <name>` in any scene; missing fields inherit from the default theme. Colors are '#hex' strings. material.kind is standard|toon|lambert|basic (standard takes roughness/metalness; any kind takes transparent/opacity/depthWrite). Optional extras: ground (opaque lit floor color), rim {color,intensity,pos}, shadowColor, outline + outlineColor (absolute line half-weight), edges (line-work color), ring (selection circles). Share a theme by sharing its JSON object.",
+
+  "synthwave": {
+    "bg": "#160b2e",
+    "ground": "#241442",
+    "hemi": { "sky": "#b86fd9", "ground": "#1a0f33", "intensity": 1.1 },
+    "sun": { "color": "#ff5fa2", "intensity": 1.6, "pos": [-6, 8, 5] },
+    "rim": { "color": "#4fd9e0", "intensity": 1.3, "pos": [8, 6, -6] },
+    "grid": { "big": "#ff2fa0", "small": "#3d2a66" },
+    "shadowOpacity": 0.4,
+    "palette": ["#ff5fa2", "#4fd9e0", "#ffd94f", "#b86fd9", "#7fff9e", "#ff8f4f"],
+    "material": { "kind": "standard", "roughness": 0.3, "metalness": 0.45 }
+  }
+}

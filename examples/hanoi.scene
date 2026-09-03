@@ -1,0 +1,120 @@
+/*
+TOWERS OF HANOI — a construction puzzle: the solution IS a move
+sequence, and the timeline below performs it. Three disks, three
+towers, 2^3 - 1 = 7 moves.
+
+The rule of the game is ONE line of geometry: never a larger disk
+resting on a smaller — `check never on(disk_3 disk_1)`. It survives
+transit (a big disk sliding OVER a small one on its way past is not
+resting on it), so the gate reads exactly what the puzzle means.
+Try the falsifier: change move 3's destination from (0 0.4 0) to
+(4 0.4 0) — disk_1 lands back on empty air where disk_2 no longer
+is; or worse, send move 4's disk_3 down onto tower_b's stack and
+watch the legality gate go red the instant it settles.
+
+The disks are TUBES — genuinely hollow, so the pegs pass through the
+bores instead of interpenetrating (hollowness is a fact, not a look).
+
+And the closing goal is the whole thesis in one statement: the rules
+layer DERIVES the 7-move plan by recursion — solve n-1 onto the
+spare, move the big one, solve n-1 back on top — and the answer it
+prints is move-for-move the sequence the animation performs. The
+engine plans; the world performs; the checks referee.
+*/
+
+theme clay
+
+// three towers as open zones — a disk is IN a tower only when it's
+// down in the stack; mid-flight it is honestly nowhere
+room tower_a size(3.2 1.4 3.2) walls(0) at(-4 0) color(#d8cfc2)
+room tower_b size(3.2 1.4 3.2) walls(0) at(0 0) color(#d8cfc2)
+room tower_c size(3.2 1.4 3.2) walls(0) at(4 0) color(#d8cfc2)
+
+cylinder peg_a r(0.12) h(1.6) at(-4 0) color(#7a6a58)
+cylinder peg_b r(0.12) h(1.6) at(0 0) color(#7a6a58)
+cylinder peg_c r(0.12) h(1.6) at(4 0) color(#7a6a58)
+
+// the disks: hollow rings threaded on the peg, largest at the bottom
+tube disk_3 r(0.3) walls(0.95) h(0.4) sides(12) at(-4 0) color(#b25438)
+tube disk_2 r(0.3) walls(0.65) h(0.4) sides(12) on(disk_3) color(#3d7fa6)
+tube disk_1 r(0.3) walls(0.35) h(0.4) sides(12) on(disk_2) color(#b98a1d)
+
+// ---- the solution: 7 moves, one beat after another --------------------
+// `then` = after the previous move lands (the 1-second gap is pacing).
+// No clock arithmetic anywhere: the story is a sequence, so the text
+// is one. Reorder the blocks and you reorder the solution.
+then 1
+// move 1: disk_1 to tower_c
+move disk_1 to(-4 2 0) over(1)
+move disk_1 to(4 2 0) over(1)
+move disk_1 to(4 0 0) over(1)
+end
+
+then 1
+// move 2: disk_2 to tower_b
+move disk_2 to(-4 2 0) over(1)
+move disk_2 to(0 2 0) over(1)
+move disk_2 to(0 0 0) over(1)
+end
+
+then 1
+// move 3: disk_1 onto disk_2
+move disk_1 to(4 2 0) over(1)
+move disk_1 to(0 2 0) over(1)
+move disk_1 to(0 0.4 0) over(1)
+end
+
+then 1
+// move 4: disk_3 to tower_c — the big crossing, right over disk_1
+move disk_3 to(-4 2 0) over(1)
+move disk_3 to(4 2 0) over(1)
+move disk_3 to(4 0 0) over(1)
+end
+
+then 1
+// move 5: disk_1 back to tower_a
+move disk_1 to(0 2 0) over(1)
+move disk_1 to(-4 2 0) over(1)
+move disk_1 to(-4 0 0) over(1)
+end
+
+then 1
+// move 6: disk_2 onto disk_3
+move disk_2 to(0 2 0) over(1)
+move disk_2 to(4 2 0) over(1)
+move disk_2 to(4 0.4 0) over(1)
+end
+
+then 1
+// move 7: disk_1 crowns the tower
+move disk_1 to(-4 2 0) over(1)
+move disk_1 to(4 2 0) over(1)
+move disk_1 to(4 0.8 0) over(1)
+end
+
+// ---- the rule of the game: these GATE every instant ------------------
+check never on(disk_2 disk_1)
+check never on(disk_3 disk_1)
+check never on(disk_3 disk_2)
+
+// ---- the tower is rebuilt --------------------------------------------
+check always in(disk_3 tower_a) during(0 13)
+check always in(disk_3 tower_c) during(16 30)
+check always on(disk_2 disk_3) during(24 30)
+check always on(disk_1 disk_2) during(28 30)
+
+// ---- the derived story (scrub and watch) -----------------------------
+? on(disk_1 disk_2)
+? when on(disk_1 disk_2)
+? when in(disk_1 tower_b)
+
+// ---- the engine derives the plan the timeline performs ---------------
+// solve n-1 onto the spare, move the big disk, solve n-1 back on top.
+// Compare the answer to the move comments above: identical, in order.
+?- assertz(hanoi(0, _, _, _, [])),
+   assertz((hanoi(N, From, To, Via, Plan) :-
+       N > 0, M is N - 1,
+       hanoi(M, From, Via, To, First),
+       hanoi(M, Via, To, From, Rest),
+       append(First, [From-To|Rest], Plan))),
+   hanoi(3, tower_a, tower_c, tower_b, Plan)

@@ -9,8 +9,11 @@ in/out — so it can be ported to another host language by translating one file.
 
 ## Program structure
 
-One statement per line. `//` starts a comment (the only comment style —
-`#` belongs to hex colors). Blank lines are ignored.
+One statement per line. `//` comments to end of line; `/* … */`
+comments span lines (tutorial prose without re-prefixing every line —
+line numbers in errors are preserved through them; a `/*` inside a
+`//` comment is prose, and a literal `'/*'` inside a quoted atom is
+not supported). `#` belongs to hex colors. Blank lines are ignored.
 Statements can reference objects defined later in the file (order is not
 meaningful — it's a set of facts).
 
@@ -26,6 +29,7 @@ group <name> <property>...                  define a group (a named frame)
 room <name> <property>...                   define a room (sugar: group + walls)
 tube <name> <property>...                   define a hollow cylinder (sugar: group + ring)
 person <name> <property>...                 define a person (sugar: body + head at human scale)
+animal <name> <property>...                 define an animal (sugar: body, head, four legs)
 link <name> between(a b) <property>...      a derived connector spanning two things
 part <name> ... end                         define a part (a reusable noun)
 <part> <name> <property>...                 instantiate a part
@@ -43,6 +47,8 @@ set <name> <member>...                      a named collection queries quantify 
 statement <speaker> <claim>                 testimony as data — the liar certificate derives
 ? <query>(<args>)                           ask a question about the scene
 check <quantified query>                    assert it — failing is a compile error
+then <gap>? ... end                         sequence block: starts when everything
+                                            written before it has finished
 ```
 
 ## Shapes and properties
@@ -68,6 +74,7 @@ Common properties (all optional):
 | `color(name)` or `color(#hex)` | CSS color name or hex |
 | `rotate(x y z)` | rotation in degrees |
 | `held-by(holder dx? dy? dz?)` | possession: pose derives from the holder, riding all movement — see Possession |
+| `glass` | a flag (no parens): sight lines pass through — `sees()` is true through it — while bounds, `in()`, and `touches` stay solid. Works on shapes, rooms (all walls), and tubes; renders translucent |
 | `appear(t)` | the object does not exist before t seconds |
 | `vanish(t)` | the object stops existing at t seconds |
 
@@ -165,6 +172,7 @@ moves as one).
 |---|---|---|
 | `size(w h d)` | the **interior**; walls extrude outward | `size(4 2.5 4)` |
 | `walls(t)` | wall thickness; `walls(0)` = an **open room** — no walls, just a flat ground pad (a yard, a plaza); query bounds are the declared interior, so `in()` works at full height. No doors or windows *on* it (nothing to cut into) — but a walled neighbour may declare `door(to the_yard)`: its wall carves one-sided and the adjacency fact is real | `0.2` |
+| `floor` | a flag: the room grows a bottom — a pad fitting the interior, in the room's color. Rooms are floorless by the dollhouse convention (look down into them); `floor` is for when the bottom is real: a boat hull, a storey slab in a multi-floor house. It blocks sight from below (`sees()` no longer passes vertically through), gives `on()` a surface, and takes room flags (`glass`) and `paint` like any wall. An open room refuses it (the ground pad already is its floor) | off |
 | `door(side width? offset?)` | a gap in a wall; side is `north/south/east/west`, offset slides it along the wall | width 1, centered |
 | `door(to room width?)` | a **shared** doorway: finds the facing walls, checks the rooms really touch, and carves one aligned opening into *both* rooms, centered on their shared stretch | width 1 |
 | `window(side width? height? sill? offset?)` | a **y-band** opening: wall stays below (the sill) and above (the lintel); sight, air — and small things — pass through the band | 0.8 × 0.8, sill 1, centered |
@@ -294,6 +302,19 @@ cast (their union center is a chest-height endpoint).
 A plain `cylinder` is still fine for a person — `person` is the same
 facts with a face on them.
 
+`animal <name> h()? color()?` is the quadruped sibling: a horizontal
+body, a head at the front (−z), four legs. `h()` is **shoulder
+height** — `h(0.15)` is a rat, `h(0.5)` a fox, `h(0.7)` a goat.
+Same contract as person: facts speak the animal's name, parts block
+sight individually, paint hits all parts, scaling works in parts.
+
+**Persons and animals can be carried.** Unlike plain groups, they may
+be held (`held-by`) and taken (`take dude goat at(1)`) — the whole
+figure rides, members and all, and a `drop` sets it down *on its
+feet* at the holder's spot (base-anchored things land on their base).
+Wear anchors work as carry points: `take dude goat at(1) off(back)`.
+This is also how a body gets moved: `person victim held-by(killer)`.
+
 ## Possession
 
 `held-by(<holder> dx? dy? dz?)` declares that a thing is carried (or
@@ -329,8 +350,8 @@ person's front is north (−z) until rotated; anchors on non-person
 holders are an error (anatomy — give numbers instead).
 
 Holders can be anything placed (a person, a box, a group, a room —
-"the safe holds the will"). Held things must be plain shapes, and they
-chain: `purse held-by(slate)`, `letter held-by(purse)` — the letter
+"the safe holds the will"). Held things are plain shapes — or persons
+and animals, which ride whole (see People) — and they chain: `purse held-by(slate)`, `letter held-by(purse)` — the letter
 crosses town in the purse in the hand. Cycles are a compile error.
 
 A held thing cannot be independently placed or animated — `at()`,
@@ -344,18 +365,37 @@ things can't anchor others: they are not valid targets for relations,
 ### take / drop — possession changing hands
 
 ```
-take <holder> <thing> at(<time>) off(dx dy dz)?
-drop <holder> <thing> at(<time>)
+take <holder> <thing> at(<time>)? off(dx dy dz)?
+drop <holder> <thing> at(<time>)?
 ```
 
 Instant events, like `appear`/`vanish` — not segments (a hand closing
-isn't a smear). A thing placed normally sits where it was put until its
+isn't a smear). The time is optional: a bare `take`/`drop` **chains**
+like an animation segment — it fires when both parties have finished
+everything written for them so far. The boarding idiom needs no
+bookkeeping:
+
+```
+walk dude to(boat 0.6 0)
+take boat dude off(0.5 0.5 0)      // fires when the walk lands
+walk boat to(north_bank 0 2) start(5)
+drop boat dude                     // fires when the boat arrives
+```
+
+Written order is the chain, exactly as with `move` segments. With
+nothing written for either party, the event fires at their birth
+(`appear`). Inside an `at <time> … end` block the block instant is
+the event's FLOOR: the event fires then, lifted later only if the
+thing itself is still finishing its own walk — so walk-and-board
+works inside a block too. Only the thing lifts the instant, never the
+holder: taking from (or dropping off) a holder that is mid-walk keeps
+the declared time — leaping aboard a moving train and mid-flight
+drops mean exactly what the block says. A thing placed normally sits where it was put until its
 first `take`; while held it rides the holder exactly as `held-by`
 things do; `drop` rests it on the ground at the holder's spot at that
 instant, where it stays. A second `take` is a hand-off (the scarf
 passes from Pine to Oak — no intervening drop needed). A born-held
 thing (`held-by`) can be dropped and re-taken; `take` works inside
-`at <time> … end` blocks (inheriting the block time) and inside
 hypothesis blocks — which is the point: the base scene declares
 everyone and everything once, and a theory is one line:
 
@@ -624,6 +664,45 @@ alone, and statement order still means nothing — inside the block or
 between blocks. Block times take h:mm, seconds, or a time name
 (`at time_of_death`).
 
+### then blocks — sequence without arithmetic
+
+```
+then
+walk goose to(boat)
+take boat goose off(-0.4 0.9 0)
+end
+
+then 2
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat goose
+check in(goose north_bank)
+end
+```
+
+`then <gap>? … end` is the at-block with a **computed** time: it
+anchors its contents at the *frontier* — the moment everything written
+before it has finished (every segment end and possession event so
+far; declarations don't count, they're order-free facts, not beats).
+The optional gap adds pacing (`then 2` = frontier + 2; `2m` works
+with a clock). Use `at` when a clue names a time; use `then` when the
+story only knows order — construction puzzles (a river crossing, a
+Hanoi solution, a heist plan) are made of "then".
+
+Everything else matches at-blocks: explicit `start()`/`at()` always
+wins; a bare check asserts *at that point in the story*; bare
+takes/drops chain within the beat; quantified queries keep their own
+timeline; no nesting. One refinement over at-blocks: within a beat,
+an object's *first* bare segment takes the anchor and its later ones
+chain — so a three-segment move is one beat, not three overlapping
+starts. Reordering `then` blocks reorders the story; that is the
+point, and it stays inside the language's one ordered corner
+(animation has chained in written order since v0.1). The frontier is
+computed once at compile into ordinary constants — `poseAt` stays
+closed-form, and the scrubber still runs backwards.
+
 ### hypotheses
 
 `hypothesis <name> … end` blocks hold **alternate theories** of one
@@ -728,6 +807,8 @@ theme ink
 | `rts` | dark terrain, player-color palette, selection rings under every object — game map |
 | `snow` | white snowfield, overcast winter light, blue-grey shadows, woolen palette — the Orient Express look |
 | `asphalt` | hazy daylight over a lit asphalt lot, crisp shadows, signal-paint palette — bus stops, airports, street scenes |
+| `meadow` | summer daylight on a lit grass field, warm sun, nature palette — riverbanks, gardens, outdoor scenes |
+| `night` | moonlit woods: deep blue sky, cool pale moon as the key light, a low warm lantern-amber rim, lit dark forest floor — cabins, campsites, anything after dark. Day-for-night bright: readable, not murky |
 
 **Custom themes** live in `themes.json` beside the playground — pure
 data, no code. Each entry is usable as `theme <name>`; missing fields
@@ -821,6 +902,12 @@ Answers appear in the output panel under the editor.
                     overlapping? the complement of overlaps' strictness
                     (overlaps excludes touching; touches includes
                     overlapping); a visible gap is false
+? on(a b)           does a REST directly on b — footprints sharing
+                    interior, a's underside meeting b's top? resting,
+                    not hovering: an object passing OVER another
+                    mid-move is false. The query form of the on()
+                    placement: the language could say it, now it can
+                    ask it
 ? adjacent(a b)     do the two ROOMS share a declared door? read off the
                     door(to) graph — a static fact about the floor plan
 ```
@@ -831,6 +918,14 @@ the person with the snake" means Taupe never had it —
 says otherwise). Set arguments work and name the carrier
 (`? carries(suspects snake) → true (oak)`), and `when carries(pine
 scales)` is the chain of custody as ranges.
+
+`on` is the stacking rule's check form — Towers of Hanoi's "never a
+larger disk on a smaller" is `check never on(disk_3 disk_1)`, and it
+survives transit: a big disk sliding over a small one on its way to
+another peg doesn't trigger (no contact — the rule is about resting,
+which is why the query is `on`, not `above`). Contact tolerance is a
+hair (1e-4), so stack with `on()` placement or exact heights; a
+hand-sunk object doesn't count as resting.
 
 `adjacent` is the odd one out: it never changes, so it takes no
 quantifier, `at()` or `during()` — but `check adjacent(a b)` works bare,
@@ -846,7 +941,9 @@ heard footsteps in the lion enclosure from the aviary" asserts both
 `sees` and `blocked-by` also draw their sight line in the viewport: green
 where clear, red from the first blocker onward. Lines are center-to-center
 in v0 — an object is not "seen" around its edges. Grazing a surface exactly
-does not block, consistent with `overlaps`.
+does not block, consistent with `overlaps`. `glass` objects never block:
+a display case shows its contents to every witness, honestly —
+`sees(guard gem)` true, `in(gem case)` also true. Seen is not touched.
 
 ### Temporal queries
 

@@ -1,0 +1,154 @@
+/*
+PROLOG 5 — PLANNING: the permutations are the machine's job.
+
+The river crossing again — but this time the engine FINDS the plan.
+
+"What sequence of crossings keeps fox+goose and goose+corn from ever
+being alone?" is a permutation search, and permutation search is
+Prolog's native gait: propose a move, check it's safe, never revisit
+a state, backtrack on dead ends. The goal at the bottom defines the
+puzzle's ABSTRACTION in nine asserted clauses — states are who's on
+which bank, moves are crossings, unsafe names the forbidden states —
+and hands it to the generic plan/4 search in rules.pl. Its first
+purple answer is, move for move, the plan the timeline below
+performs. You write the rules of the game; the machine walks the
+permutations.
+
+The deep point is the division of labor. The solver never touches
+the geometry — it searches a sixteen-state symbolic model, a
+REDUCTION someone had to write. Classic planning's silent failure is
+a wrong reduction: delete the goose-eats-corn clause from unsafe/1
+below and the solver's first answer confidently ferries the FOX
+first — abandoning goose and corn alone together at the very first
+crossing. Nothing in pure Prolog pushes back. Here, staging that plan kills
+it: chaperoned(goose_and_corn, dude) reads the world's own
+whereabouts facts and answers no. The engine plans in the small
+world; the geometry referees the plan in the full one. A wrong
+abstraction can lie to the solver, but not to the scene.
+*/
+
+theme meadow
+
+room river color(#4a7d9e) walls(0) size(10 4 8)
+room south_bank color(#8a6f4d) walls(0) south-of(river) size(10 2 4)
+room north_bank color(#8a6f4d) walls(0) north-of(river) size(10 2 4)
+
+room boat color(#7a5a3a) size(1 .5 2) floor at(river 0 3)
+
+set total_actors
+person dude at(south_bank 0 0)
+animal goose h(0.7) at(south_bank 0 1) color(#d8d0c0)
+animal fox h(0.45) at(south_bank 0 -1) color(#c05a2a)
+box corn size(0.4 0.4 0.4) at(south_bank -1 0) color(#d9b23a)
+end
+
+set fox_and_goose fox goose
+set goose_and_corn goose corn
+
+// ---- the contract: what any plan must satisfy ------------------------
+?- carries_at_most(boat, 2)
+?- chaperoned(fox_and_goose, dude)
+?- chaperoned(goose_and_corn, dude)
+
+// ---- the found plan, performed ---------------------------------------
+// each beat below is one ferry(...) from the solver's answer
+
+then
+walk goose to(boat)
+take boat goose off(-0.4 0.9 0)
+end
+
+then
+walk dude to(boat 0.6 0)
+take boat dude off(0.5 0.9 0)
+end
+
+then 1
+// ferry(goose)
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat goose
+end
+
+then 1
+// ferry(alone)
+walk boat to(south_bank 0 -1.5)
+end
+
+then
+walk fox to(south_bank 0 -1.5)
+take boat fox off(-0.4 0.9 0)
+end
+
+then 1
+// ferry(fox)
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat fox
+take boat goose off(-0.4 0.9 0)
+end
+
+then 1
+// ferry(goose) — the ride back, the move humans miss
+walk boat to(south_bank 0 -1.5)
+end
+
+then
+drop boat goose
+take boat corn off(-0.4 0.9 0)
+end
+
+then 1
+// ferry(corn)
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat corn
+end
+
+then 1
+// ferry(alone)
+walk boat to(south_bank 0 -1.5)
+end
+
+then
+take boat goose off(-0.4 0.9 0)
+end
+
+then 1
+// ferry(goose)
+walk boat to(north_bank 0 1.5)
+end
+
+then
+drop boat goose
+check in(dude north_bank)
+check in(goose north_bank)
+check in(fox north_bank)
+check in(corn north_bank)
+end
+
+// ---- the solver: nine clauses of abstraction, then search ------------
+// state(Man, Fox, Goose, Corn) — each on south_bank or north_bank.
+// The first answer is the plan staged above, move for move. More
+// answers = more surviving plans (the second classic ferries the corn
+// before the fox). To watch a wrong abstraction get caught, delete the
+// goose/corn unsafe clause: the solver's first plan ferries the fox
+// first, and staging it turns chaperoned(goose_and_corn, dude) to no.
+?- assertz(opp(south_bank, north_bank)),
+   assertz(opp(north_bank, south_bank)),
+   assertz((cross(state(M, F, G, C), ferry(alone), state(M2, F, G, C)) :- opp(M, M2))),
+   assertz((cross(state(M, F, G, C), ferry(fox), state(M2, M2, G, C)) :- M = F, opp(M, M2))),
+   assertz((cross(state(M, F, G, C), ferry(goose), state(M2, F, M2, C)) :- M = G, opp(M, M2))),
+   assertz((cross(state(M, F, G, C), ferry(corn), state(M2, F, G, M2)) :- M = C, opp(M, M2))),
+   assertz((unsafe(state(M, F, G, _)) :- F = G, F \= M)),
+   assertz((unsafe(state(M, _, G, C)) :- G = C, G \= M)),
+   assertz((riversafe(S) :- \+ unsafe(S))),
+   plan(cross, riversafe,
+        state(south_bank, south_bank, south_bank, south_bank),
+        state(north_bank, north_bank, north_bank, north_bank), Plan)

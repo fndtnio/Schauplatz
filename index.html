@@ -246,12 +246,24 @@ box wall     size(4 2 0.2) north-of(crate 1) color(#5b6575)
 `;
 
 CodeMirror.defineMode("scene", () => ({
-  token(stream) {
+  startState: () => ({ block: false }),
+  token(stream, state) {
+    if (state.block) {
+      if (stream.match(/^.*?\*\//)) state.block = false;
+      else stream.skipToEnd();
+      return "comment";
+    }
+    if (stream.match(/\/\*/)) {
+      state.block = true;
+      if (stream.match(/^.*?\*\//)) state.block = false;
+      else stream.skipToEnd();
+      return "comment";
+    }
     if (stream.match(/\/\/.*/)) return "comment";
     if (stream.match(/\?/)) return "keyword";
     if (stream.match(/#[0-9a-fA-F]{3,8}\b/)) return "atom";
     if (stream.match(/-?(\d+\.?\d*|\.\d+)/)) return "number";
-    if (stream.match(/(box|sphere|cylinder|group|room|link|part|end|move|turn|orbit|walk|theme|view|clock|check|set|ever|always|when|never)\b/)) return "keyword";
+    if (stream.match(/(box|sphere|cylinder|group|room|tube|person|animal|link|part|end|move|turn|orbit|walk|paint|take|drop|camera|statement|theme|view|clock|time|check|set|hypothesis|active|then|ever|always|when|never)\b/)) return "keyword";
     if (stream.match(/[A-Za-z_][\w-]*(?=\()/)) return "def";
     if (stream.match(/[A-Za-z_][\w-]*/)) return "variable";
     stream.next();
@@ -671,7 +683,8 @@ function runGoals(compiled) {
 
   // goal lint: a misspelled atom doesn't error, it just answers "no" —
   // flag any atom that matches nothing in the scene or the rules
-  const vocab = new Set(["true", "fail", "false", "not", "inf", "nan", "assert", "asserta", "assertz", "retract"]);
+  const vocab = new Set(["true", "fail", "false", "not", "inf", "nan", "assert", "asserta", "assertz", "retract",
+    "is", "length", "findall", "setof", "bagof", "append", "sort", "msort", "between", "nth0", "nth1", "succ"]);
   // an assert IS a definition: its predicate joins the vocabulary, so
   // the scene-side rule idiom (assertz a rule, use it in later goals)
   // lints clean — while a typo of that predicate elsewhere still warns
@@ -999,6 +1012,26 @@ const SCENE_THEMES = {
     outline: 0,
     edges: null,
   },
+  // moonlit woods: deep blue night with a cool pale moon for a key
+  // light and a low warm lantern-amber rim — the cabin-at-night
+  // contrast (cold outside, firelight somewhere). Ground is a lit
+  // dark forest floor (the noir lesson: interiors are shaped by
+  // light, never swallowed by the background)
+  night: {
+    bg: 0x131b2e,
+    ground: 0x39463a,
+    // day-for-night: film night is brighter than real night — the
+    // moon fills like a cold sun, or nothing reads
+    hemi: { sky: 0x9db0d6, ground: 0x2b322a, intensity: 2.6 },
+    sun: { color: 0xdde8fa, intensity: 2.6, pos: [-6, 9, 4] },
+    rim: { color: 0xd9a441, intensity: 0.85, pos: [7, 5, 6] },
+    grid: { big: 0x232c40, small: 0x1a2233 },
+    shadowOpacity: 0.2, // unused while ground is opaque; kept for symmetry
+    palette: ["#2f4a38", "#6b5642", "#d9a441", "#b9c6dd", "#b25438", "#7d8699"],
+    material: { kind: "standard", roughness: 0.8 },
+    outline: 0,
+    edges: null,
+  },
   // street level: hazy daylight over a lit asphalt lot — bus stops,
   // airports, parking lots, crime scenes with chalk lines. Crisp
   // daytime shadows, signal-paint palette (transit yellow, bus red,
@@ -1013,6 +1046,22 @@ const SCENE_THEMES = {
     shadowOpacity: 0.2, // unused while ground is opaque; kept for symmetry
     palette: ["#e8b73a", "#c94f3d", "#2f6db5", "#9aa2a8", "#e07b2f", "#4f8f6a"],
     material: { kind: "standard", roughness: 0.8 },
+    outline: 0,
+    edges: null,
+  },
+  // summer daylight: a lit grass field under a hazy sky — riverbanks,
+  // gardens, picnics, crime scenes with better weather. Warm sun,
+  // nature palette (foliage, bark, river, stone, poppy, wheat)
+  meadow: {
+    bg: 0x9fc4e8,
+    ground: 0x527d42,
+    hemi: { sky: 0xeaf4ff, ground: 0x5a7a4a, intensity: 1.15 },
+    sun: { color: 0xfff2d8, intensity: 1.5, pos: [6, 11, 4] },
+    rim: { color: 0xcfe0f0, intensity: 0.4, pos: [-7, 8, -5] },
+    grid: { big: 0x5d8a4e, small: 0x4a7040 },
+    shadowOpacity: 0.2, // unused while ground is opaque; kept for symmetry
+    palette: ["#3f7a4a", "#7a5a3a", "#4a90d9", "#8a8d84", "#c94f3d", "#d9b23a"],
+    material: { kind: "standard", roughness: 0.85 },
     outline: 0,
     edges: null,
   },
@@ -1321,6 +1370,14 @@ window.onCompiled = function (c) {
       buildMaterial(theme.material, resolveColor(o.color, paletteSlot.get(o.family || o.name), theme.palette), o),
     );
     mesh.castShadow = mesh.receiveShadow = true;
+    if (o.glass) {
+      // glass renders what it IS: sight passes through — translucent,
+      // depthWrite off so contents show, no shadow (light passes too)
+      mesh.material.transparent = true;
+      mesh.material.opacity = 0.22;
+      mesh.material.depthWrite = false;
+      mesh.castShadow = false;
+    }
     mesh.userData.name = o.name;
     if (o.track && o.track.paint && o.track.paint.length) {
       // painted objects restyle per frame; remember the birth color —
@@ -1508,7 +1565,7 @@ renderer.domElement.addEventListener("pointermove", (e) => {
     const part = (latest.objects || []).find((o) => o.name === hn);
     if (part && part.parent) {
       const par = (latest.objects || []).find((o) => o.name === part.parent);
-      if (par && par.person) hn = par.name;
+      if (par && (par.person || par.animal)) hn = par.name;
     }
     let label = hn;
     const ho = (latest.objects || []).find((o) => o.name === hn);

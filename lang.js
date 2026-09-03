@@ -30,8 +30,8 @@
     "west-of": 0.25, "east-of": 0.25, "south-of": 0.25, "north-of": 0.25,
   };
 
-  const QUERIES = new Set(["overlaps", "distance", "sees", "blocked-by", "in", "adjacent", "carries", "touches"]);
-  const BOOLEAN_QUERIES = new Set(["sees", "overlaps", "in", "carries", "touches"]); // quantifiable / checkable
+  const QUERIES = new Set(["overlaps", "distance", "sees", "blocked-by", "in", "adjacent", "carries", "touches", "on"]);
+  const BOOLEAN_QUERIES = new Set(["sees", "overlaps", "in", "carries", "touches", "on"]); // quantifiable / checkable
 
   // Themes are a whole-scene rendering hint: zero semantic effect (bounds,
   // sight lines, and queries ignore them). The core only validates the name
@@ -128,11 +128,50 @@
     const times = new Map(); // name -> { name, tok, line, value } — named time facts
     const goals = []; // ?- goal(...) — questions FOR THE RULES LAYER, data here
     const events = []; // take/drop — possession changing hands on the timeline
+    const thenBlocks = []; // sequence blocks — anchored at the frontier in buildTracks
     const statements = []; // statement <speaker> <claim> — testimony as data
     const cameras = []; // camera segments — scripted projection, zero semantics
     let theme = null; // { name, line }
     let view = null; // { name, line }
     let clock = null; // { start: minutes, minute: seconds-per-story-minute, line }
+
+    // /* block comments */ vanish first — a character walk, not a
+    // regex, so `/*` inside a // comment stays prose and every newline
+    // survives (error line numbers must not shift). Quoted atoms are
+    // not tracked: a literal '/*' inside quotes isn't supported.
+    src = (() => {
+      let out = "";
+      let mode = 0; // 0 code, 1 line comment, 2 block comment
+      let line = 1;
+      let openLine = 0;
+      for (let i = 0; i < src.length; i++) {
+        const c = src[i];
+        const d = src[i + 1];
+        if (c === "\n") {
+          line++;
+          if (mode === 1) mode = 0;
+          out += "\n";
+          continue;
+        }
+        if (mode === 0) {
+          if (c === "/" && d === "/") { mode = 1; out += "//"; i++; continue; }
+          if (c === "/" && d === "*") { mode = 2; openLine = line; out += "  "; i++; continue; }
+          if (c === "*" && d === "/") {
+            errors.push({ line, msg: "stray */ — no /* opened this comment" });
+            out += "  ";
+            i++;
+            continue;
+          }
+          out += c;
+          continue;
+        }
+        if (mode === 1) { out += c; continue; }
+        if (c === "*" && d === "/") { mode = 0; out += "  "; i++; continue; }
+        out += " ";
+      }
+      if (mode === 2) errors.push({ line: openLine, msg: "/* comment is never closed — missing */" });
+      return out;
+    })();
 
     const stripped = src
       .split("\n")
@@ -284,8 +323,8 @@
     stripped.forEach((line, i) => {
       if (skip[i]) return;
       const lineNo = i + 1;
-      if (!cur && (/^at\b/.test(line) || /^set\s+[A-Za-z_][\w-]*\s*$/.test(line))) {
-        blockDepth++; // at-blocks and set-BLOCKS (bare `set name`) parse in pass 2
+      if (!cur && (/^(at|then)\b/.test(line) || /^set\s+[A-Za-z_][\w-]*\s*$/.test(line))) {
+        blockDepth++; // at/then-blocks and set-BLOCKS (bare `set name`) parse in pass 2
         return;
       }
       if (!cur && /^clock\b/.test(line)) {
@@ -491,13 +530,50 @@
         block = { t0, t1, line: lineNo };
         return;
       }
+
+      // then <gap>? ... end — the SEQUENCE block: anchors its contents
+      // at the FRONTIER (the moment everything written before it has
+      // finished), plus an optional pacing gap. The at-block with a
+      // computed time: the story's order becomes the schedule, and no
+      // absolute number is invented. Animation has always been the
+      // language's one ordered corner (segments chain in written
+      // order); then extends chaining from an object's segments to the
+      // scene's beats.
+      if (/^then\b/.test(line)) {
+        if (block) {
+          errors.push({ line: lineNo, msg: `time blocks don't nest (block open since line ${block.line})` });
+          return;
+        }
+        const m = line.match(/^then(?:\s+(\S+))?$/);
+        if (!m) {
+          errors.push({ line: lineNo, msg: "expected: then <gap>? ... end" });
+          return;
+        }
+        let gap = 0;
+        if (m[1] !== undefined) {
+          if (/:/.test(m[1])) {
+            errors.push({ line: lineNo, msg: "then takes a gap DURATION, not a clock time — then 2m or seconds" });
+            return;
+          }
+          const mm = m[1].match(/^(\d+(?:\.\d+)?)m$/);
+          if (mm && timeCtx.clock) gap = parseFloat(mm[1]) * timeCtx.clock.minute;
+          else gap = num(m[1]);
+          if (gap === null || gap < 0) {
+            errors.push({ line: lineNo, msg: "then: expected a non-negative gap in seconds (or 2m with a clock)" });
+            return;
+          }
+        }
+        block = { then: thenBlocks.length, gap, line: lineNo };
+        thenBlocks.push({ id: thenBlocks.length, gap, line: lineNo });
+        return;
+      }
       if (line === "end") {
         // pass 1 already vetted this end as an at-block's; after a
         // nesting error block may be null — swallow either way
         block = null;
         return;
       }
-      const blockAt = block ? { t0: block.t0, t1: block.t1 } : null;
+      const blockAt = block ? (block.then !== undefined ? { then: block.then } : { t0: block.t0, t1: block.t1 }) : null;
 
       // ?- goal(Args) — a question for the RULES LAYER. The core carries
       // it as data (compiled.goals); evaluation happens wherever an
@@ -626,7 +702,7 @@
     }
 
     return {
-      objects, queries, anims, events, errors, sets, goals, statements, cameras,
+      objects, queries, anims, events, errors, sets, goals, statements, cameras, thenBlocks,
       theme: theme ? theme.name : null,
       view: view ? view.name : null,
       clock: clock ? { start: clock.start, minute: clock.minute } : null,
@@ -805,7 +881,8 @@
     // A range block anchors anims at its START (the window scopes what
     // holds; movement that establishes it begins as the window opens).
     if (blockAt != null && a.start === null && a.after === null) {
-      a.start = blockAt.t0;
+      if (blockAt.then !== undefined) a.thenBlock = blockAt.then;
+      else a.start = blockAt.t0;
     }
     anims.push(a);
   }
@@ -854,10 +931,14 @@
         return err(`${kind} doesn't take ${key}() — just at(time)${kind === "take" ? " and off(dx dy dz)" : ""}`);
       }
     }
-    if (e.t === null && blockAt != null) e.t = blockAt.t0;
-    if (e.t === null) {
-      return err(`${kind} needs at(<time>) — the moment possession ${kind === "take" ? "begins" : "ends"}`);
+    if (e.t === null && blockAt != null) {
+      if (blockAt.then !== undefined) e.thenBlock = blockAt.then;
+      else e.blockT = blockAt.t0;
     }
+    // no explicit time: the event CHAINS — resolved in buildPossession,
+    // when segment end times are known (the walk lands, then the hand
+    // closes). A block's instant is the floor, not the fill: a bare
+    // event never interrupts the thing's own walk.
     events.push(e);
   }
 
@@ -963,7 +1044,10 @@
     }
     if (seg.to && seg.from) return err("camera: to() or from(), not both — a dolly or a mount");
     if (!seg.to && !seg.from && !seg.look) return err("camera needs to(), from(), or look()");
-    if (blockAt != null && seg.start === null && seg.after === null) seg.start = blockAt.t0;
+    if (blockAt != null && seg.start === null && seg.after === null) {
+      if (blockAt.then !== undefined) seg.thenBlock = blockAt.then;
+      else seg.start = blockAt.t0;
+    }
     cameras.push(seg);
   }
 
@@ -989,6 +1073,7 @@
     let at = null;
     let during = null;
     let except = null;
+    let thenBlock = null;
     let r = trailing;
     while (r.length) {
       const pm = r.match(/^([A-Za-z_][\w-]*)\(([^)]*)\)\s*/);
@@ -1032,7 +1117,15 @@
     // always/when keep their own timeline (never combines, as instant
     // negation). Range block: fills during(); a BARE boolean reads as a
     // duration fact — "held throughout" — so it defaults to always.
-    if (blockAt != null && fn !== "adjacent" && at === null && during === null) {
+    if (blockAt != null && blockAt.then !== undefined) {
+      // a then block is an instant known only after chaining resolves —
+      // mark now, fill in compile (same rule as an instant at-block:
+      // bare/never queries get at(anchor); a quantifier keeps its own
+      // timeline)
+      if (fn !== "adjacent" && at === null && during === null && (!quant || quant === "never")) {
+        thenBlock = blockAt.then;
+      }
+    } else if (blockAt != null && fn !== "adjacent" && at === null && during === null) {
       if (blockAt.t1 === null) {
         if (!quant || quant === "never") at = blockAt.t0;
       } else if (quant) {
@@ -1070,14 +1163,14 @@
       if (quant === "when") {
         return err("check needs a true/false answer — ever, always, never, or at(time)");
       }
-      if (!quant && at === null) return err("check needs ever/always/never, or at(time)");
+      if (!quant && at === null && thenBlock === null) return err("check needs ever/always/never, or at(time)");
       if (at !== null && !BOOLEAN_QUERIES.has(fn)) {
         return err(`check needs a true/false query — ${[...BOOLEAN_QUERIES].join(", ")}`);
       }
     }
     queries.push({
       line: lineNo, fn, quant: quant || null, args: splitArgs(rawArgs),
-      at, during, except, check: !!isCheck,
+      at, during, except, thenBlock, check: !!isCheck,
     });
   }
 
@@ -1092,12 +1185,12 @@
     const [, shape, name, rest] = stmt;
 
     const partDef = ctx && ctx.parts && ctx.parts.get(shape);
-    if (!SHAPES.has(shape) && shape !== "group" && shape !== "room" && shape !== "tube" && shape !== "person" && shape !== "link" && !partDef) {
+    if (!SHAPES.has(shape) && shape !== "group" && shape !== "room" && shape !== "tube" && shape !== "person" && shape !== "animal" && shape !== "link" && !partDef) {
       if (ctx && ctx.nestedFrom && ctx.nestedFrom.has(shape)) {
         err(`parts can't use other parts (yet) — "${shape}" must be spelled out here`);
         return;
       }
-      const known = [...SHAPES].join(", ") + ", group, room, tube, person";
+      const known = [...SHAPES].join(", ") + ", group, room, tube, person, animal";
       const partNames = ctx && ctx.parts && ctx.parts.size ? ", " + [...ctx.parts.keys()].join(", ") : "";
       err(`unknown shape "${shape}" (available: ${known}${partNames})`);
       return;
@@ -1108,16 +1201,24 @@
     }
 
     // Pull off property calls one at a time: key(args) key(args) ...
+    // A bare word is a FLAG property (glass) — args: [], and unknown
+    // flags still error in applyProp, so typos can't hide as flags.
     const props = [];
     let r = rest;
     while (r.length) {
       const m = r.match(/^([A-Za-z_][\w-]*)\(([^)]*)\)\s*/);
-      if (!m) {
+      if (m) {
+        props.push({ key: m[1], args: splitArgs(m[2]) });
+        r = r.slice(m[0].length);
+        continue;
+      }
+      const f = r.match(/^([A-Za-z_][\w-]*)\s*/);
+      if (!f) {
         err(`can't read "${r}" — properties look like name(args)`);
         return;
       }
-      props.push({ key: m[1], args: splitArgs(m[2]) });
-      r = r.slice(m[0].length);
+      props.push({ key: f[1], args: [] });
+      r = r.slice(f[0].length);
     }
 
     const timeCtx = ctx && ctx.timeCtx;
@@ -1131,6 +1232,10 @@
     }
     if (shape === "person") {
       makePerson(name, props, lineNo, objects, err, timeCtx);
+      return;
+    }
+    if (shape === "animal") {
+      makeAnimal(name, props, lineNo, objects, err, timeCtx);
       return;
     }
     if (partDef) {
@@ -1249,6 +1354,7 @@
         }
         if (o.heldBy) o.heldBy = { ...o.heldBy, off: o.heldBy.off.map((v) => v * s) };
         if (o.person) o.person = { ...o.person, h: o.person.h * s };
+        if (o.animal) o.animal = { ...o.animal, h: o.animal.h * s };
         if (o.size) o.size = o.size.map((v) => v * s);
         if (o.r !== null) o.r *= s;
         if (o.h !== null) o.h *= s;
@@ -1386,6 +1492,8 @@
     };
     let size = [4, 2.5, 4];
     let thick = 0.2;
+    let glass = false;
+    let floor = false;
     let color = "#5b6575";
     const doors = { north: [], south: [], east: [], west: [] };
     const windows = { north: [], south: [], east: [], west: [] };
@@ -1399,6 +1507,22 @@
             return err("size(): expected 3 positive numbers — the interior w h d");
           }
           size = v;
+          break;
+        }
+        case "glass": {
+          // a display case, a greenhouse: the walls are real (bounds,
+          // touch, containment) but sight passes through
+          if (p.args.length) return err("glass is a flag — no arguments");
+          glass = true;
+          break;
+        }
+        case "floor": {
+          // a boat hull, a storey slab: rooms are floorless by the
+          // dollhouse convention, but sometimes the bottom is real —
+          // it takes the room's color, blocks sight from below, and
+          // gives on() a surface
+          if (p.args.length) return err("floor is a flag — no arguments");
+          floor = true;
           break;
         }
         case "walls": {
@@ -1505,6 +1629,7 @@
     if (thick === 0) {
       // open room: a flat pad instead of walls; doors/windows have no
       // wall to live in
+      if (floor) return err(`"${name}" is an open room (walls(0)) — it already IS its floor (the ground pad)`);
       if (autos.length || Object.values(doors).some((d) => d.length) || Object.values(windows).some((w) => w.length)) {
         return err(`"${name}" is an open room (walls(0)) — there are no walls for doors or windows (declare the doorway from the walled neighbour instead: door(to ${name}) carves its wall and declares adjacency)`);
       }
@@ -1521,6 +1646,21 @@
           ...wallBoxes(name, wl, [{ lo: -wl.span / 2, hi: wl.span / 2, win: null }], size[1], thick, color, lineNo, group),
         );
       }
+      if (floor) {
+        // the open-room ground pad, granted to a walled room: fits the
+        // interior, between the walls. Slightly THICKER than a zone pad
+        // (0.06 vs 0.04) so a floored room standing in — or crossing —
+        // an open zone keeps its top face off the pad's plane: coplanar
+        // faces z-fight, and a boat's hull flickering with the river
+        // under it looks like a bug in the world
+        members.push({
+          name: `${name}-floor`, shape: "box", line: lineNo,
+          size: [size[0], 0.06, size[2]],
+          r: null, h: null, sides: null,
+          at: [0, 0.03, 0], rel: null, rot: [0, 0, 0], color,
+          appear: group.appear, vanish: group.vanish, parent: name,
+        });
+      }
     }
 
     for (const m of members) {
@@ -1530,7 +1670,8 @@
         );
       }
     }
-    group.room = { size, thick, color, doors, windows, autos };
+    if (glass) for (const m of members) m.glass = true;
+    group.room = { size, thick, color, glass, floor, doors, windows, autos };
     objects.set(name, group);
     for (const m of members) objects.set(m.name, m);
   }
@@ -1638,6 +1779,7 @@
     let h = 1;
     let thick = 0.05;
     let sides = 8;
+    let glass = false;
     let color = null;
 
     for (const p of props) {
@@ -1652,6 +1794,11 @@
           const v = nums(p.args, 1);
           if (!v || v[0] <= 0) return err("h(): expected one positive number");
           h = v[0];
+          break;
+        }
+        case "glass": {
+          if (p.args.length) return err("glass is a flag — no arguments");
+          glass = true;
           break;
         }
         case "walls": {
@@ -1701,6 +1848,7 @@
         rel: null, rot: [0, (k * 360) / sides, 0], color,
         appear: group.appear, vanish: group.vanish, parent: name,
         family: `${name}/seg`, // one palette slot; "/" keeps it out of implicit sets
+        glass: glass || undefined,
       });
     }
     for (const m of members) {
@@ -1710,7 +1858,7 @@
         );
       }
     }
-    group.tube = { r, h, thick, sides, color };
+    group.tube = { r, h, thick, sides, color, glass };
     objects.set(name, group);
     for (const m of members) objects.set(m.name, m);
   }
@@ -1729,6 +1877,7 @@
       at: null, rel: null, rot: [0, 0, 0], color: null,
       appear: 0, vanish: null, parent: null,
     };
+    group.person = {}; // early: held-by()'s group guard excepts persons
     let h = 1.7;
     let color = null;
 
@@ -1752,6 +1901,9 @@
 
     if (group.at && group.rel) {
       return err(`"${name}": use at() or a placement relation, not both`);
+    }
+    if (group.heldBy && (group.at || group.rel || group.rot[0] || group.rot[1] || group.rot[2])) {
+      return err(`"${name}": held-by() derives position and rotation from the holder — drop at/relations/rotate`);
     }
     if (group.vanish !== null && group.vanish <= group.appear) {
       return err(`"${name}": vanish(${group.vanish}) must come after appear(${group.appear})`);
@@ -1786,6 +1938,82 @@
       }
     }
     group.person = { h, color };
+    objects.set(name, group);
+    for (const m of members) objects.set(m.name, m);
+  }
+
+  // animal <name> h()? color()? — the quadruped sibling of person: a
+  // horizontal body, a head at the front (-z, the person-front
+  // convention), four legs so the silhouette reads at a glance. h() is
+  // SHOULDER height; everything scales from it — h(0.15) is a rat,
+  // h(0.5) a fox, h(0.7) a goat. Facts speak the animal's name, and —
+  // unlike plain groups — animals (and persons) can be carried.
+  function makeAnimal(name, props, lineNo, objects, err, timeCtx) {
+    const group = {
+      name, shape: "group", line: lineNo,
+      size: null, r: null, h: null, sides: null,
+      at: null, rel: null, rot: [0, 0, 0], color: null,
+      appear: 0, vanish: null, parent: null,
+    };
+    group.animal = {}; // early: held-by()'s group guard excepts animals
+    let h = 0.6;
+    let color = null;
+
+    for (const p of props) {
+      switch (p.key) {
+        case "h": {
+          const v = nums(p.args, 1);
+          if (!v || v[0] <= 0) return err("h(): expected one positive number — shoulder height");
+          h = v[0];
+          break;
+        }
+        case "color": {
+          if (p.args.length !== 1) return err("color(): expected one color name or #hex");
+          color = p.args[0];
+          break;
+        }
+        default:
+          if (!applyProp(group, p, err, timeCtx)) return;
+      }
+    }
+
+    if (group.at && group.rel) {
+      return err(`"${name}": use at() or a placement relation, not both`);
+    }
+    if (group.heldBy && (group.at || group.rel || group.rot[0] || group.rot[1] || group.rot[2])) {
+      return err(`"${name}": held-by() derives position and rotation from the holder — drop at/relations/rotate`);
+    }
+    if (group.vanish !== null && group.vanish <= group.appear) {
+      return err(`"${name}": vanish(${group.vanish}) must come after appear(${group.appear})`);
+    }
+
+    const bodyR = 0.22 * h;
+    const L = 1.3 * h;
+    const legLen = h - 2 * bodyR;
+    const mk = (mname, shape, extra) => ({
+      name: `${name}-${mname}`, shape, line: lineNo,
+      size: null, r: null, h: null, sides: null,
+      at: [0, 0, 0], rel: null, rot: [0, 0, 0], color,
+      appear: group.appear, vanish: group.vanish, parent: name,
+      family: `${name}/animal`,
+      ...extra,
+    });
+    const members = [
+      mk("body", "cylinder", { r: bodyR, h: L, at: [0, h - bodyR, 0], rot: [90, 0, 0] }),
+      mk("head", "sphere", { r: 0.26 * h, at: [0, h - bodyR + 0.12 * h, -(L / 2 + 0.06 * h)] }),
+      mk("leg-1", "cylinder", { r: 0.06 * h, h: legLen, at: [0.13 * h, legLen / 2, -(L / 2 - 0.14 * h)] }),
+      mk("leg-2", "cylinder", { r: 0.06 * h, h: legLen, at: [-0.13 * h, legLen / 2, -(L / 2 - 0.14 * h)] }),
+      mk("leg-3", "cylinder", { r: 0.06 * h, h: legLen, at: [0.13 * h, legLen / 2, L / 2 - 0.14 * h] }),
+      mk("leg-4", "cylinder", { r: 0.06 * h, h: legLen, at: [-0.13 * h, legLen / 2, L / 2 - 0.14 * h] }),
+    ];
+    for (const m of members) {
+      if (objects.has(m.name)) {
+        return err(
+          `animal "${name}" creates a part named "${m.name}", but that name is taken (line ${objects.get(m.name).line})`,
+        );
+      }
+    }
+    group.animal = { h, color };
     objects.set(name, group);
     for (const m of members) objects.set(m.name, m);
   }
@@ -1952,6 +2180,7 @@
           m.dims = { w: m.size[0], h: m.size[1], d: m.size[2] };
           m.bboxOff = [0, 0, 0];
           m.family = wall.family || null;
+          m.glass = wall.glass || undefined;
           objects.set(m.name, m);
         }
       }
@@ -2048,8 +2277,8 @@
         // A person holder also takes a named WEAR ANCHOR — head, neck,
         // chest, back, hand — computed from their proportions: worn
         // possession, visible (and honestly seeable) instead of pocketed.
-        if (obj.shape === "group") {
-          return bad("groups can't be held — hold a plain shape (a box can be the package)");
+        if (obj.shape === "group" && !obj.person && !obj.animal) {
+          return bad("groups can't be held — hold a plain shape, a person, or an animal");
         }
         if (args.length < 1 || num(args[0]) !== null) {
           return bad("expected held-by(holder), held-by(holder dx dy dz), or held-by(person head|neck|chest|back|hand)");
@@ -2069,6 +2298,15 @@
       case "color": {
         if (args.length !== 1) return bad("expected one color name or #hex");
         obj.color = args[0];
+        return true;
+      }
+      case "glass": {
+        // a FACT, not a look: glass never blocks a sight line —
+        // sees(witness, knife) is true through the display case, while
+        // in()/touches/bounds stay solid. Renderers draw it translucent.
+        if (args.length) return bad("glass is a flag — no arguments");
+        if (obj.shape === "group") return bad("groups aren't glass — use a glass room, or flag the members");
+        obj.glass = true;
         return true;
       }
       case "appear": case "vanish": {
@@ -2615,11 +2853,64 @@
   // previous one ends (unless start() is explicit) and starts from wherever
   // the previous one left off (unless from() is explicit).
 
-  function buildTracks(objects, anims, errors) {
+  function buildTracks(objects, anims, errors, events = [], thenBlocks = [], thenAnchors = new Map()) {
     const cursors = new Map(); // "target\0kind" -> { end, lastTo }
     let duration = 0;
 
-    for (const a of anims) {
+    // THE FRONTIER: how far the story has gotten, walking statements in
+    // written order — every segment end and possession event so far.
+    // A then-block anchors at the frontier as of its opener (+ gap);
+    // declarations never feed it (they are order-free facts, not beats).
+    let frontier = 0;
+    const pendingThen = thenBlocks.slice();
+    const anchorUpTo = (line) => {
+      while (pendingThen.length && pendingThen[0].line < line) {
+        const b = pendingThen.shift();
+        thenAnchors.set(b.id, frontier + b.gap);
+      }
+    };
+    // within one then block, an object's FIRST bare segment takes the
+    // anchor; its later bare segments chain from it (a move is three
+    // written lines, one beat)
+    const thenTaken = new Set();
+
+    // a bare take/drop resolves here, interleaved in written order: in
+    // a block (at or then) the block instant is the floor, lifted past
+    // the THING's own landing; outside, it fires when both parties have
+    // finished everything written for them so far
+    const resolveEvent = (e) => {
+      if (e.t == null) {
+        const th = objects.get(e.thing), ho = objects.get(e.holder);
+        const floor = e.thenBlock != null ? thenAnchors.get(e.thenBlock) : e.blockT;
+        let t;
+        if (floor != null) {
+          t = floor;
+          for (const a of anims) {
+            if (a.kind === "paint" || a.line >= e.line || a._t1 == null) continue;
+            if (a.target !== e.thing) continue;
+            if (a._t1 > t) t = a._t1;
+          }
+        } else {
+          t = Math.max(th ? th.appear : 0, ho ? ho.appear : 0);
+          for (const a of anims) {
+            if (a.kind === "paint" || a.line >= e.line || a._t1 == null) continue;
+            if (a.target !== e.holder && a.target !== e.thing) continue;
+            if (a._t1 > t) t = a._t1;
+          }
+        }
+        e.t = t;
+      }
+      if (e.t > frontier) frontier = e.t;
+    };
+
+    const items = anims.map((a) => ({ line: a.line, a }))
+      .concat(events.map((e) => ({ line: e.line, e })))
+      .sort((x, y) => x.line - y.line); // stable: same-line fan-outs keep order
+
+    for (const it of items) {
+      anchorUpTo(it.line);
+      if (it.e) { resolveEvent(it.e); continue; }
+      const a = it.a;
       const obj = objects.get(a.target);
       if (!obj) {
         errors.push({ line: a.line, msg: `${a.kind}: no object named "${a.target}"` });
@@ -2640,7 +2931,7 @@
         continue;
       }
       if (a.kind === "paint" && (obj.shape === "group" || obj.shape === "marker")) {
-        if (obj.room || obj.tube || obj.person) {
+        if (obj.room || obj.tube || obj.person || obj.animal) {
           // painting a ROOM (or a tube) paints its walls — the same
           // surfaces its color() owns at birth (segments, sills and
           // lintels included). Runs post-carve, so it lands on the real
@@ -2648,11 +2939,14 @@
           for (const w of objects.values()) {
             // rooms/tubes paint their box pieces; a person paints all
             // their parts (body cylinder + head sphere)
-            if (w.parent !== obj.name || (w.shape !== "box" && !obj.person)) continue;
+            if (w.parent !== obj.name || (w.shape !== "box" && !obj.person && !obj.animal)) continue;
             const wkey = w.name + "/paint";
             const wcur = cursors.get(wkey) || { end: w.appear + (w.clockShift || 0), lastTo: null };
-            const wt0 = a.start !== null ? a.start + (a.startShift || 0) : wcur.end + (a.after || 0);
+            const wt0 = a.start !== null ? a.start + (a.startShift || 0)
+              : a.thenBlock != null ? thenAnchors.get(a.thenBlock)
+              : wcur.end + (a.after || 0);
             const wt1 = wt0 + a.over;
+            if (wt1 > frontier) frontier = wt1;
             if (!w.track) w.track = { move: [], turn: [], paint: [] };
             w.track.paint.push({ t0: wt0, t1: wt1, from: wcur.lastTo !== null ? wcur.lastTo : w.color, to: a.to, ease: a.ease });
             cursors.set(wkey, { end: wt1, lastTo: a.to });
@@ -2677,8 +2971,15 @@
       // a repeated copy's clock runs stagger-shifted: chaining starts late,
       // and explicit start() times shift with it
       const cur = cursors.get(key) || { end: obj.appear + (obj.clockShift || 0), lastTo: null };
-      const t0 = a.start !== null ? a.start + (a.startShift || 0) : cur.end + (a.after || 0);
+      let t0;
+      if (a.start !== null) t0 = a.start + (a.startShift || 0);
+      else if (a.thenBlock != null && !thenTaken.has(a.thenBlock + "|" + key)) {
+        t0 = thenAnchors.get(a.thenBlock) + (a.startShift || 0);
+        thenTaken.add(a.thenBlock + "|" + key);
+      } else t0 = cur.end + (a.after || 0);
       const t1 = t0 + a.over;
+      a._t1 = t1; // bare take/drop events chain from these
+      if (t1 > frontier) frontier = t1;
 
       if (a.kind === "paint") {
         // the color channel chains like the spatial ones; from may be null —
@@ -2807,6 +3108,8 @@
       if (t1 > duration) duration = t1;
     }
 
+    anchorUpTo(Infinity); // trailing then blocks (checks-only beats)
+
     for (const o of objects.values()) {
       if (o.track) {
         o.track.move.sort((x, y) => x.t0 - y.t0);
@@ -2845,12 +3148,14 @@
     };
     const byThing = new Map();
     for (const e of events) {
+      // bare events were resolved in buildTracks (interleaved with the
+      // segments they chain from)
       const thing = objects.get(e.thing);
       const holder = objects.get(e.holder);
       if (!thing) { errors.push({ line: e.line, msg: `${e.kind}: no object named "${e.thing}"` }); continue; }
       if (!holder) { errors.push({ line: e.line, msg: `${e.kind}: no object named "${e.holder}"` }); continue; }
-      if (thing.shape === "group" || thing.shape === "link" || thing.shape === "marker") {
-        errors.push({ line: e.line, msg: `${e.kind}: "${e.thing}" is a ${thing.shape} — only plain shapes can change hands` });
+      if ((thing.shape === "group" && !thing.person && !thing.animal) || thing.shape === "link" || thing.shape === "marker") {
+        errors.push({ line: e.line, msg: `${e.kind}: "${e.thing}" is a ${thing.shape} — only shapes, persons, and animals can change hands` });
         continue;
       }
       if (holder.shape === "link" || holder.shape === "marker") {
@@ -2888,7 +3193,7 @@
           if (lateSeg) {
             errors.push({
               line: evs[0].line,
-              msg: `"${name}" still ${chn === "move" ? "moves" : "turns"} after its first take/drop (at ${firstT}) — its position belongs to possession from there on; finish its own animation earlier, or animate the holder`,
+              msg: `"${name}" still ${chn === "move" ? "moves" : "turns"} after its first take/drop (at ${firstT}) — its position belongs to possession from there on; drop the event's at() so it chains to the ${chn === "move" ? "walk" : "turn"}'s end, finish the animation earlier, or animate the holder`,
             });
             bad = true;
           }
@@ -2944,7 +3249,10 @@
     for (const { o, d } of all) {
       const h = poseAt(compiled, d.t).get(d.holder);
       if (!h) continue;
-      d.pos = [h.pos[0], o.dims.h / 2, h.pos[2]]; // dropped things land: ground-rest at the holder's spot
+      // dropped things land: ground-rest at the holder's spot (persons
+      // and animals are base-anchored — their origin IS the ground)
+      const restY = o.person || o.animal ? 0 : o.dims.h / 2;
+      d.pos = [h.pos[0], restY, h.pos[2]];
     }
   }
 
@@ -3264,6 +3572,25 @@
     // drop point after a drop. Chains resolve holder-first (the letter
     // in the purse in the hand); repeat's spread/jitter composes on top.
     const heldDone = new Set();
+    // a held/dropped GROUP (person, animal) moves as a unit: once its
+    // frame pose is overridden, its members re-derive from the new
+    // frame (their main-pass world poses used the placed frame)
+    function reposeMembers(groupName) {
+      const gw = out.get(groupName);
+      const gmat = eulerToMat(gw.rot);
+      for (const o2 of compiled.objects) {
+        if (o2.parent !== groupName) continue;
+        const l = locals.get(o2.name);
+        const off2 = matVec(gmat, l.pos);
+        const mat2 = matMul(gmat, eulerToMat(l.rot));
+        out.set(o2.name, {
+          ...out.get(o2.name),
+          pos: [gw.pos[0] + off2[0], gw.pos[1] + off2[1], gw.pos[2] + off2[2]],
+          rot: matToEuler(mat2),
+          present: l.present && gw.present,
+        });
+      }
+    }
     function deriveHeld(name) {
       if (heldDone.has(name)) return;
       heldDone.add(name);
@@ -3283,9 +3610,17 @@
         // the chest (plain shapes: bboxOff is zero, nothing changes)
         const bOff = holder.bboxOff ? matVec(m, holder.bboxOff) : [0, 0, 0];
         const off = matVec(m, iv.off);
+        // center the held thing's UNION at the carry point (a person or
+        // animal group's origin is at its feet — subtract its own
+        // bounds offset, rotated with the ride; plain shapes: zero)
+        const own = o.bboxOff ? matVec(m, o.bboxOff) : [0, 0, 0];
         out.set(name, {
           ...p,
-          pos: [h.pos[0] + bOff[0] + off[0] + extra[0], h.pos[1] + bOff[1] + off[1] + extra[1], h.pos[2] + bOff[2] + off[2] + extra[2]],
+          pos: [
+            h.pos[0] + bOff[0] + off[0] + extra[0] - own[0],
+            h.pos[1] + bOff[1] + off[1] + extra[1] - own[1],
+            h.pos[2] + bOff[2] + off[2] + extra[2] - own[2],
+          ],
           rot: h.rot,
           present: p.present && h.present,
           // the full holder chain at this instant, nearest first — the
@@ -3293,6 +3628,7 @@
           // is carried by all three... well, by the bag and the hand)
           carriedBy: [iv.holder, ...(h.carriedBy || [])],
         });
+        if (o.shape === "group") reposeMembers(name);
         return;
       }
       let last = null;
@@ -3302,6 +3638,7 @@
           ...p,
           pos: [last.pos[0] + extra[0], last.pos[1] + extra[1], last.pos[2] + extra[2]],
         });
+        if (o.shape === "group") reposeMembers(name);
       }
       // before the first take: the ordinary placed pose already in `out`
     }
@@ -3393,6 +3730,11 @@
   // overlaps' strictness: overlaps excludes touching, touches includes
   // overlapping.
   const TOUCH_EPS = 1e-4;
+  function restsOn(A, B) {
+    return A.min[0] < B.max[0] && B.min[0] < A.max[0]
+        && A.min[2] < B.max[2] && B.min[2] < A.max[2]
+        && Math.abs(A.min[1] - B.max[1]) <= TOUCH_EPS;
+  }
   function boxesTouch(A, B) {
     for (let i = 0; i < 3; i++) {
       if (A.min[i] - B.max[i] > TOUCH_EPS || B.min[i] - A.max[i] > TOUCH_EPS) return false;
@@ -3487,6 +3829,11 @@
 
     // Is o inside group a or b? Members never block their own sight line.
     function underEndpoint(o, aName, bName) {
+      // carried things never shield their carrier: a pocketed gem sits
+      // at the thief's center, but a sight line TO the thief must not
+      // hit it (the reverse — the body concealing the gem — still holds,
+      // because there the gem is the endpoint and the body the blocker)
+      if (o.carriedBy && (o.carriedBy.includes(aName) || o.carriedBy.includes(bName))) return true;
       let cur = o;
       while (cur && cur.parent) {
         if (cur.parent === aName || cur.parent === bName) return true;
@@ -3500,7 +3847,7 @@
     function blockersBetween(p0, p1, a, b) {
       const hits = [];
       for (const o of objects.values()) {
-        if (o === a || o === b || o.shape === "group" || o.shape === "marker" || o.present === false) continue;
+        if (o === a || o === b || o.shape === "group" || o.shape === "marker" || o.glass || o.present === false) continue;
         if (underEndpoint(o, a.name, b.name)) continue;
         const t = segmentEntersAABB(p0, p1, aabbOf(o));
         if (t !== null) hits.push({ name: o.name, t });
@@ -3512,7 +3859,7 @@
     // boolean form for sweeps: the first blocker settles it
     function anyBlocker(p0, p1, a, b) {
       for (const o of objects.values()) {
-        if (o === a || o === b || o.shape === "group" || o.shape === "marker" || o.present === false) continue;
+        if (o === a || o === b || o.shape === "group" || o.shape === "marker" || o.glass || o.present === false) continue;
         if (underEndpoint(o, a.name, b.name)) continue;
         if (segmentEntersAABB(p0, p1, aabbOf(o)) !== null) return true;
       }
@@ -3563,6 +3910,11 @@
     // possession data, not geometry (poseAt stamps the holder chain)
     if (fn === "carries") return !!(b.carriedBy && b.carriedBy.includes(a.name));
     if (fn === "touches") return boxesTouch(eng.boundsOf(a), eng.boundsOf(b));
+    // on(a b): a RESTS directly on b — footprints share interior and
+    // a's underside meets b's top within a hair. Resting, not hovering:
+    // a disk sliding OVER a stack mid-move doesn't trigger (the Hanoi
+    // legality gate must survive transit)
+    if (fn === "on") return restsOn(eng.boundsOf(a), eng.boundsOf(b));
     return !eng.anyBlocker(eng.centerOf(a), eng.centerOf(b), a, b);
   }
 
@@ -3694,6 +4046,10 @@
           result.value = boxesTouch(boundsOf(a), boundsOf(b));
           result.text = `${label} → ${result.value}`;
           break;
+        case "on":
+          result.value = restsOn(boundsOf(a), boundsOf(b));
+          result.text = `${label} → ${result.value}`;
+          break;
         case "in":
           result.value = centerInside(a, b, { centerOf, boundsOf });
           result.text = `${label} → ${result.value}`;
@@ -3757,7 +4113,7 @@
       for (let p = o.parent; p; ) {
         const po = byName.get(p);
         if (!po) return false;
-        if (po.room || po.tube || po.person) return true;
+        if (po.room || po.tube || po.person || po.animal) return true;
         p = po.parent;
       }
       return false;
@@ -3765,7 +4121,7 @@
     // person groups ARE movers (facts speak "bob", not "bob-head" —
     // their members are excluded above, like room walls)
     const movers = compiled.objects.filter(
-      (o) => !o.room && (o.shape !== "group" || o.person) && o.shape !== "marker" && o.shape !== "link" && !partOfStructure(o),
+      (o) => !o.room && (o.shape !== "group" || o.person || o.animal) && o.shape !== "marker" && o.shape !== "link" && !partOfStructure(o),
     );
 
     // sight facts are exported for SET MEMBERS only — the cast you've
@@ -3778,7 +4134,7 @@
     // center is a chest-height endpoint the sees() machinery already
     // handles; order admits groups too (rooms in a set get left_of
     // facts — the zebra houses)
-    const cast = castAll.filter((o) => o.shape !== "group" || o.person);
+    const cast = castAll.filter((o) => o.shape !== "group" || o.person || o.animal);
     const castPairs = [];
     for (let i = 0; i < cast.length; i++) {
       for (let j = i + 1; j < cast.length; j++) castPairs.push([cast[i], cast[j]]);
@@ -4192,14 +4548,25 @@
   // ------------------------------------------------------------------- API
 
   function compile(src) {
-    const { objects, queries, anims, events, errors, sets, goals, statements, cameras, theme, view, clock, times, hypotheses, active, parts } = parse(src);
+    const { objects, queries, anims, events, errors, sets, goals, statements, cameras, thenBlocks, theme, view, clock, times, hypotheses, active, parts } = parse(src);
     expandRepeats(objects, anims, queries, errors);
     resolveAll(objects, errors);
     const adjacency = carveDoors(objects, errors);
     // after the carve, so a link may span a doorway/window MARKER —
     // the Speckled Band's bell-rope hangs from a ventilator
     validateLinks(objects, errors);
-    const duration = buildPossession(objects, events, errors, buildTracks(objects, anims, errors));
+    const thenAnchors = new Map();
+    const duration = buildPossession(objects, events, errors,
+      buildTracks(objects, anims, errors, events, thenBlocks, thenAnchors));
+    // queries and camera segments in then blocks learn their instant now
+    for (const q of queries) {
+      if (q.thenBlock != null && q.at === null) q.at = thenAnchors.get(q.thenBlock) || 0;
+    }
+    for (const cs of cameras) {
+      if (cs.thenBlock != null && cs.start === null && cs.after === null) {
+        cs.start = thenAnchors.get(cs.thenBlock) || 0;
+      }
+    }
 
     // named sets queries can quantify over: repeat families come free
     // (every family of copies is a set), explicit `set` statements on top
@@ -4242,7 +4609,7 @@
     return compiled;
   }
 
-  const Schauplatz = { compile, sample, sampleCamera, prolog: prologFacts, version: "0.45.0" };
+  const Schauplatz = { compile, sample, sampleCamera, prolog: prologFacts, version: "0.52.0" };
 
   if (typeof module !== "undefined" && module.exports) module.exports = Schauplatz;
   global.Schauplatz = Schauplatz;

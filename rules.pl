@@ -162,6 +162,31 @@ satisfies([among(A, Bs)|Cs], P) :- member(B, Bs), member(A-B, P), satisfies(Cs, 
 has(A, B) :- has(A, B, _, _).
 has_at(A, B, T) :- has(A, B, T0, T1), T0 =< T, T =< T1.
 
+% the chaperone rule: A and B never share a room without Chap present
+% for the WHOLE encounter — a pair-overlap window in some room that no
+% chaperone interval covers is a violation. Interval algebra over the
+% whole timeline, like carries_solo; the unknown staging room is
+% exempt (the with/3 precedent: parked together isn't together).
+% Instant boundary touches (zero-width overlap) don't count.
+%   ?- chaperoned_pair(fox, goose, dude)
+chaperoned_pair(A, B, Chap) :-
+    \+ (in(A, R, A0, A1), in(B, R, B0, B1), R \= unknown,
+        S is max(A0, B0), E is min(A1, B1), S < E,
+        \+ (in(Chap, R, D0, D1), D0 =< S, E =< D1)).
+
+% every pair in Set chaperoned — when ALL pairs are dangerous
+%   ?- chaperoned(keep_seperated, dude)
+chaperoned(Set, Chap) :-
+    \+ (set_member(Set, A), set_member(Set, B), A \= B,
+        \+ chaperoned_pair(A, B, Chap)).
+
+% the tiny-boat certificate: A never holds two things at the same
+% time — checked against the WHOLE timeline via possession intervals
+% (two holds conflict iff their intervals overlap; ends inclusive).
+%   ?- carries_solo(dude)
+carries_solo(A) :-
+    \+ (has(A, X, X0, X1), has(A, Y, Y0, Y1), X \= Y, X0 =< Y1, Y0 =< X1).
+
 % transitive possession: the label welded to the bag rides whoever
 % takes the bag ("whoever has the bag of cash knew they could get
 % away" — attach the motive to the bag, and carries/2 answers the
@@ -203,7 +228,59 @@ reach_(A, C, T, V) :- touches_at(A, B, T), \+ member(B, V), reach_(B, C, T, [B|V
 %   ?- reaches_set(battery, blade_open, Xs)
 reaches_set(A, TN, Xs) :- findall(X, reaches(A, X, TN), L), sort(L, Xs).
 
+% ---- planning --------------------------------------------------------------
+% A plan is a path through a state space, and finding one is a query.
+% plan(Move, Safe, Start, Goal, Plan): Move and Safe are predicate NAMES
+% the scene defines (assertz per-scene rules) — the ENGINE is generic,
+% the DOMAIN is yours. call(Move, S, Op, S2) proposes one operation;
+% call(Safe, S2) keeps it legal; no state is ever revisited. Prolog's
+% backtracking does the permutation work.
+%
+% Domain example (the river): states like state(south_bank, south_bank,
+% north_bank, south_bank) for man/fox/goose/corn, operations like
+% ferry(goose) or ferry(alone), cross/3 proposing crossings via opp/2,
+% unsafe/1 naming the forbidden states, riversafe/1 = \+ unsafe.
+%   ?- plan(cross, riversafe, state(s,s,s,s), state(n,n,n,n), Plan)
+plan(Move, Safe, Start, Goal, Plan) :-
+    plan_(Move, Safe, Start, Goal, [Start], Plan).
+plan_(_, _, Goal, Goal, _, []).
+plan_(Move, Safe, S, Goal, Seen, [Op|Ops]) :-
+    call(Move, S, Op, S2),
+    call(Safe, S2),
+    \+ member(S2, Seen),
+    plan_(Move, Safe, S2, Goal, [S2|Seen], Ops).
+
 % ---- counting --------------------------------------------------------------
+% How many members of Set are in room R at named time TN — the census
+% question. Equality proofs fall out of unification: ask two counts
+% with the SAME variable and the goal succeeds only if they match.
+%   ?- count_in(brandy, glass_b, settled, N), count_in(water, glass_a, settled, N)
+count_in(Set, R, TN, N) :-
+    time_fact(TN, T),
+    findall(X, (set_member(Set, X), present_at(X, R, T)), L),
+    length(L, N).
+
+% How many members of Set does Holder hold at named time TN — the
+% possession census (count_in's mirror: rooms have whereabouts,
+% holders have has/4 intervals). The boat's manifest, the thief's
+% pockets. Direct holds only; ends inclusive like present_at.
+%   ?- count_held(total_actors, boat, departure, N)
+count_held(Set, Holder, TN, N) :-
+    time_fact(TN, T),
+    findall(X, (set_member(Set, X), has(Holder, X, T0, T1), T0 =< T, T =< T1), L),
+    length(L, N).
+
+% Capacity, for the WHOLE timeline: Holder never holds more than N
+% things at once. The load only grows at a take, so counting at each
+% interval start suffices; an interval ending exactly then doesn't
+% count (a hand-through swap is not a co-load).
+%   ?- carries_at_most(boat, 2)
+carries_at_most(H, N) :-
+    \+ (has(H, _, S, _),
+        findall(X, (has(H, X, X0, X1), X0 =< S, S < X1), Xs),
+        length(Xs, M), M > N).
+
+
 % Every room in RoomSet has exactly one member of Set — the Murdle
 % contract as a single certificate ("no room fails" — forall is spelled
 % double negation). RoomSet is YOUR set of real puzzle rooms, so

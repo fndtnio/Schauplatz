@@ -1,0 +1,107 @@
+/*
+CABIN IN THE WOODS — an AUTHORING template. The other templates help
+you solve someone else's mystery; this one helps you write your own.
+
+WHY THIS MANY ROOMS. A mystery is uncertainty about where people
+were, so the map has to hold that uncertainty. One room: everyone is
+together, every alibi is everyone's alibi — nothing to deduce. Two
+rooms: a coin flip; the first clue ends it. The workable minimum is
+about five or six places: enough that each suspect can CLAIM a
+different one, that two suspects can vouch for each other while a
+third stands unverified, and that sight lines and adjacency start
+carrying clues ("she'd have seen him cross the main room", "he heard
+the shed door from the clearing"). This cabin gives you four indoor
+rooms, a porch, a clearing, the woods, and a shed — plus `unknown`,
+the room for everyone the testimony hasn't accounted for yet.
+
+HOW TO AUTHOR (write the truth first, then hide it):
+  1. THE TRUTH — write everyone's REAL timeline: walks, the murder,
+     the weapon's take/drop. You are the omniscient narrator here.
+     Get it green against the victory checks you owe yourself
+     (body where it's found, killer at the scene at time_of_death).
+  2. THE TESTIMONY — one statement per suspect, written FROM the
+     truth: the innocent tell it straight, the killer's claim
+     contradicts it. The panel derives each claim's truth and
+     assembles the liar certificate for you.
+  3. THE CLUES — every clue you plan to give the reader becomes a
+     check or goal HERE, against the true world. A clue that can't
+     go red in any rival world discriminates nothing — delete it.
+  4. THE AUDIT — your mystery is DONE when sole() binds exactly one
+     answer, and BROKEN if it binds one before your last clue lands.
+     Red-test: perturb the truth (move the killer, swap the weapon)
+     and watch which gates catch it. The ones that don't are
+     decoration.
+*/
+
+theme night
+clock 9:00 minute(1)
+time time_of_death 9:45
+time discovered 10:10
+
+// ---- the map ---------------------------------------------------------
+room unknown size(8 2.5 5) at(-16 0 -14) color(black)
+
+room main_room size(5 2.5 4) floor door(to porch) color(#6b5f4c)
+room kitchen west-of(main_room) door(to main_room) size(3 2.5 4) floor color(#54685c)
+room bunk_room east-of(main_room) door(to main_room) size(3 2.5 4) floor color(#5b586e)
+room back_room north-of(main_room) door(to main_room) size(5 2.5 3) floor color(#6e5555) window(north 1 1 1)
+// the window faces the woods: someone outside can see in — sight
+// lines pass a window, bodies don't
+
+room porch south-of(main_room) walls(0) size(5 2 2) color(#55503f)
+room clearing south-of(porch) walls(0) size(12 2 5) color(#4d5742)
+room woods west-of(clearing) size(5 2 12) walls(0) color(#3d4835)
+room shed east-of(clearing) door(to clearing) size(2.5 2.2 2.5) color(#57503f)
+
+part tree
+  cylinder trunk r(0.14) h(1.4) color(#3a3028)
+  sphere crown r(0.8) at(0 2 0) color(#22301f)
+end
+tree pine at(woods 0 0) repeat(4) spread(0.5 0 2.5) jitter(1.4 0 0.8 11)
+
+// ---- the cast --------------------------------------------------------
+//victim: found in ___ at ___
+person body at(back_room 0.8 0.5) color(grey)
+turn body to(90 0 0) over(0)
+
+set suspects
+person host at(unknown -3 -1) color(firebrick)
+person cook at(unknown -2 -1) color(steelblue)
+person guide at(unknown -1 -1) color(seagreen)
+person stranger at(unknown 0 -1) color(darkgoldenrod)
+end
+
+box weapon size(0.35 0.1 0.1) at(unknown 2 1) color(#8a8d94)
+
+// ---- 1. THE TRUTH (yours — the reader never sees this file) ----------
+// the pattern, worked once: the cook really was in the kitchen 9:30
+// to 9:50, and can say so
+walk cook to(kitchen) over(0) start(9:30)
+walk cook to(unknown -2 -1) over(0) start(9:50)
+// ...write the killer's real path to the back_room here, the weapon's
+// take/drop, and everyone else's true whereabouts. Return people to
+// unknown when their real account ends — the amber lint below the
+// panel will point at anyone left unaccounted.
+
+// ---- 2. THE TESTIMONY ------------------------------------------------
+// one per suspect, written FROM the truth; the killer's is the lie.
+// The panel shows each claim's truth and derives the liar certificate.
+statement cook present_at(cook, kitchen, 45)
+// statement host ...
+// statement guide ...
+// statement stranger ...
+
+// ---- 3. THE CLUES (each one gates the true world) --------------------
+check always in(cook kitchen) during(9:30 9:50)
+// check never sees(...)         — who could NOT have witnessed it
+// check adjacent(shed clearing) — earwitness geometry
+// check ever carries(...)       — who held the weapon, and when
+
+// ---- 4. THE AUDIT ----------------------------------------------------
+// where was everyone at the fatal moment?
+?- set_member(suspects, X), where(X, time_of_death, R)
+// who cannot be cleared for the scene?
+?- could(suspects, X, back_room, time_of_death)
+// the verdict — your mystery is finished when this binds EXACTLY one,
+// and only after the final clue:
+?- sole(suspects, X, back_room, time_of_death)

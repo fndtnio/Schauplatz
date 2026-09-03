@@ -65,6 +65,33 @@ test("comments and blank lines are ignored", () => {
   assert.equal(Object.keys(s).length, 1);
 });
 
+test("block comments: multiline prose vanishes, inline works, line numbers survive", () => {
+  const s = scene(`/* a tutorial paragraph
+spanning several lines
+with statements inside that must not run:
+box ghost size(9 9 9)
+*/
+box real /* inline note */ size(2 2 2)`);
+  assert.equal(Object.keys(s).length, 1);
+  assert.deepEqual(s.real.dims, { w: 2, h: 2, d: 2 });
+  // an error AFTER a block comment reports its true line
+  const errs = compile(`/* one
+two
+three */
+box a
+box a`).errors;
+  assert.equal(errs[0].line, 5); // the duplicate, at line 5, not line 3
+});
+
+test("block comments: unclosed and stray delimiters error; // shields /*", () => {
+  assert.match(errorsOf("box a\n/* never closed")[0], /never closed/);
+  assert.match(errorsOf("box a\n*/")[0], /stray \*\//);
+  // /* inside a line comment is prose, not an opener
+  const c = compile("// patterns like /*.scene\nbox a size(1 1 1)");
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.objects.length, 1);
+});
+
 test("# is not a comment (// is the only style); hex colors are untouched", () => {
   const s = scene("box b color(#8b5e3c)");
   assert.equal(s.b.color, "#8b5e3c");
@@ -2794,6 +2821,279 @@ test("camera chains and null before the first segment", () => {
 camera to(0 5 5) start(2) over(0)`);
   assert.equal(sampleCamera(c, 1), null); // free camera until the script starts
   assert.deepEqual(sampleCamera(c, 3).pos, [0, 5, 5]);
+});
+
+// ------------------------------------------------------------------- glass
+
+test("glass never blocks sight; solid does — and stays solid for in/touches", () => {
+  const src = (flag) => `sphere eye r(0.1) at(0 1 6)
+box knife size(0.1 0.4 0.05) at(0 1 -2)
+box pane size(2 2 0.1) at(0 1 2)${flag ? " glass" : ""}
+? sees(eye knife)
+? touches(pane pane)`;
+  assert.equal(compile(src(false)).results[0].value, false); // the pane blocks
+  const c = compile(src(true));
+  assert.equal(c.results[0].value, true); // glass: sight passes
+  assert.equal(c.results[0].text.includes("blocked"), false);
+});
+
+test("a glass room: see the exhibit, still contained; blocked-by skips glass", () => {
+  const c = compile(`room case size(2 1.6 2) glass
+box gem size(0.2 0.2 0.2) at(case)
+person guard at(4 0)
+? sees(guard gem)
+? in(gem case)
+? blocked-by(guard gem)`);
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.results[0].value, true); // seen THROUGH the display case
+  assert.equal(c.results[1].value, true); // and honestly inside it
+  assert.deepEqual(c.results[2].value, []); // nothing in the way
+  assert.ok(c.objects.filter((o) => o.parent === "case").every((o) => o.glass));
+});
+
+test("glass survives the door carve, works on tubes, and guards its grammar", () => {
+  const carved = compile(`room lobby size(4 2.5 4) glass door(east)
+sphere eye r(0.1) at(8 1 0)
+box statue size(0.4 1 0.4) at(lobby -1 0)
+? sees(eye statue)`);
+  assert.deepEqual(carved.errors, []);
+  assert.equal(carved.results[0].value, true); // carved glass pieces still glass
+  const tube = compile(`tube beaker r(0.4) h(1.2) glass
+sphere pebble r(0.1) at(0 0.3 0)
+sphere eye r(0.1) at(3 0.5 0)
+? sees(eye pebble)`);
+  assert.deepEqual(tube.errors, []);
+  assert.equal(tube.results[0].value, true); // seen through the beaker wall
+  assert.match(errorsOf("box b glass(1)")[0], /glass is a flag/);
+  assert.match(errorsOf("group g glass")[0], /groups aren't glass/);
+  assert.match(errorsOf("box b shiny")[0], /unknown property/);
+});
+
+// ------------------------------------------------------ animals & carrying
+
+test("animal desugars: shoulder height, head at the front, legs on the ground", () => {
+  const c = compile("animal goat h(0.7) at(2 0)");
+  assert.deepEqual(c.errors, []);
+  const posed = sample(c, 0).objects;
+  const body = posed.find((o) => o.name === "goat-body");
+  const head = posed.find((o) => o.name === "goat-head");
+  const leg = posed.find((o) => o.name === "goat-leg-1");
+  assert.ok(Math.abs(body.pos[1] + body.r - 0.7) < 1e-9); // body top = shoulder height
+  assert.ok(head.pos[2] < body.pos[2]); // head forward, -z
+  assert.ok(Math.abs(leg.pos[1] - leg.h / 2) < 1e-9); // hooves on the ground
+  assert.equal(head.family, "goat/animal");
+});
+
+test("animal facts speak the name; the group is the mover", () => {
+  const c = compile(`clock 1:00 minute(1)
+room a size(3 2.5 3) at(0 0 0)
+room b size(3 2.5 3) east-of(a 2)
+animal fox h(0.5) at(a)
+walk fox to(b) over(2) start(1:01)`);
+  assert.deepEqual(c.errors, []);
+  assert.deepEqual([...new Set(c.facts.whereabouts.map((w) => w.name))], ["fox"]);
+});
+
+test("a person can CARRY an animal: members ride, drop rests it on its feet", () => {
+  const c = compile(`room west size(5 2.5 4) walls(0) at(-4 0)
+room east size(5 2.5 4) walls(0) at(4 0)
+person dude at(west)
+animal goat h(0.7) at(west -1 1)
+take dude goat at(1)
+walk dude to(east) over(2) start(1)
+drop dude goat at(4)
+? carries(dude goat) at(2)`);
+  assert.deepEqual(c.errors, []);
+  const mid = sample(c, 2).objects;
+  const dude = mid.find((o) => o.name === "dude");
+  const head = mid.find((o) => o.name === "goat-head");
+  assert.ok(Math.abs(head.pos[0] - dude.pos[0]) < 1.2); // the whole goat rides
+  assert.ok(head.pos[1] > 0.3); // carried, not dragged at y=0
+  const end = sample(c, 5).objects;
+  const goat = end.find((o) => o.name === "goat");
+  assert.ok(Math.abs(goat.pos[0] - 4) < 0.6 && Math.abs(goat.pos[1]) < 1e-9); // on its feet on the east bank
+  const legEnd = end.find((o) => o.name === "goat-leg-1");
+  assert.ok(Math.abs(legEnd.pos[1] - legEnd.h / 2) < 1e-9); // legs grounded after the drop
+  const q = c.queries.find((x) => x.temp);
+  assert.equal(q.temp.value, true); // carries() sees the ride
+});
+
+test("a person can carry a person — the body can be moved", () => {
+  const c = compile(`room cellar size(4 2.5 4) at(0 0 0)
+room garden size(4 2.5 4) east-of(cellar 2) walls(0)
+person killer at(cellar)
+person victim held-by(killer)
+walk killer to(garden) over(2)
+drop killer victim at(3)`);
+  assert.deepEqual(c.errors, []);
+  const after = sample(c, 4).objects;
+  const victim = after.find((o) => o.name === "victim");
+  assert.ok(victim.pos[0] > 2 && Math.abs(victim.pos[1]) < 1e-9); // left in the garden, on the ground
+});
+
+test("plain groups still can't change hands; tube cargo still refused", () => {
+  assert.match(errorsOf(`group crate
+box side size(1 1 0.1) in(crate)
+person dude
+take dude crate at(1)`)[0], /only shapes, persons, and animals/);
+  assert.match(errorsOf(`tube pipe r(0.2) h(1)
+person dude at(2 0)
+take dude pipe at(1)`)[0], /only shapes, persons, and animals/);
+});
+
+test("a carried thing doesn't shield its carrier from sight", () => {
+  const c = compile(`person guard at(0 0)
+person thief at(4 0)
+sphere gem r(0.16) held-by(thief)
+? sees(guard thief)
+? sees(guard gem)`);
+  assert.deepEqual(c.errors, []);
+  assert.equal(c.results[0].value, true); // the pocketed gem must NOT hide the thief
+  assert.equal(c.results[1].value, false); // but the thief's body still conceals the gem
+});
+
+// ------------------------------------------------------------- room floors
+
+test("floor flag: a walled room grows a bottom — colored, sight-blocking", () => {
+  const c = compile(`room boat size(1 .5 2) floor glass color(#7a5a3a)
+sphere gem r(0.1) at(8 0.5 0)
+box watcher size(0.2 0.2 0.2) at(8 -2 0)
+room deck size(2 2 2) at(8 0) floor
+? sees(watcher gem)`);
+  assert.deepEqual(c.errors, []);
+  const f = c.objects.find((o) => o.name === "boat-floor");
+  assert.deepEqual(f.size, [1, 0.06, 2]); // interior-fitting; thicker than a
+  // zone pad (0.04) so the top faces never share a plane — coplanar = z-fight
+  assert.equal(f.glass, true); // room flags reach the floor
+  // the dollhouse limit, closed: a floor blocks sight from below
+  assert.equal(c.results[0].value, false);
+  // an open room already IS its floor
+  const bad = compile(`room yard walls(0) floor`);
+  assert.match(bad.errors[0].msg, /already IS its floor/);
+});
+
+// ------------------------------------------------------------- then blocks
+
+test("then blocks anchor at the frontier; gaps pace; contents chain", () => {
+  const c = compile(`box boat size(1.6 0.4 1) at(0 3)
+person dude at(0 5)
+animal goose h(0.7) at(1 5)
+then
+walk goose to(boat)
+take boat goose off(-0.4 0.9 0)
+end
+then 2
+walk boat to(0 -5) over(3)
+end
+then
+drop boat goose
+check in(goose river)
+end
+then 1
+move boat to(3 0 -5) over(1)
+move boat to(3 2 -5) over(1)
+end
+room river size(4 2 4) walls(0) at(0 -5)`);
+  assert.deepEqual(c.errors, []);
+  const g = (n) => c.objects.find((o) => o.name === n);
+  // beat 1 at 0: walk [0,1], take chains to 1
+  assert.equal(g("goose").possession.intervals[0].t0, 1);
+  // beat 2: frontier 1 + gap 2 = 3; beat 3 drop on arrival at 6
+  assert.deepEqual(g("boat").track.move.map((s) => [s.t0, s.t1]), [[3, 6], [7, 8], [8, 9]]);
+  assert.equal(g("goose").possession.drops[0].t, 6);
+  // beat 4: first bare segment takes the anchor (7), the second CHAINS —
+  // one beat, several written lines
+});
+
+test("then: a bare check gets the beat's instant; explicit start wins", () => {
+  const c = compile(`box a size(1 1 1) at(0 0)
+box b size(1 1 1) at(5 0)
+move a to(5 0 0.5) over(2)
+then
+check overlaps(a b)
+move b to(9 0 0) over(1) start(10)
+end`);
+  assert.deepEqual(c.errors, []);
+  const q = c.results.find((r) => r.text.includes("overlaps"));
+  assert.match(q.text, /at\(2\.00\)/); // anchored where the story had gotten
+  const b = c.objects.find((o) => o.name === "b");
+  assert.equal(b.track.move[0].t0, 10); // start() beat the anchor
+});
+
+// ------------------------------------------------------ possession chaining
+
+test("bare take/drop chain: the walk lands, then the hand closes", () => {
+  const c = compile(`box boat size(1.6 0.4 1) at(0 3)
+person dude at(0 5)
+box corn size(0.4 0.4 0.4) at(-1 5)
+walk dude to(boat 0.6 0) over(1)
+take boat dude off(0.5 0.5 0)
+take boat corn
+walk boat to(0 -5) over(3) start(5)
+drop boat corn`);
+  assert.deepEqual(c.errors, []);
+  const g = (n) => c.objects.find((o) => o.name === n);
+  // dude's take chains to his walk's end; corn (nothing written) loads at birth
+  assert.equal(g("dude").possession.intervals[0].t0, 1);
+  assert.equal(g("corn").possession.intervals[0].t0, 0);
+  // the drop chains to the boat's arrival
+  assert.equal(g("corn").possession.drops[0].t, 8);
+});
+
+test("bare events inside an at-block: block instant, lifted past the thing's landing", () => {
+  const c = compile(`box shelf size(1 1 1) at(0 3)
+box vase size(0.3 0.3 0.3) at(2 0)
+at 5
+take shelf vase
+end`);
+  assert.deepEqual(c.errors, []);
+  const vase = c.objects.find((o) => o.name === "vase");
+  assert.equal(vase.possession.intervals[0].t0, 5);
+  // the boarding idiom works IN the block: walk + bare take, no collision
+  const b = compile(`box boat size(1.6 0.4 1) at(0 3)
+person dude at(0 5)
+at 0
+walk dude to(boat 0.6 0)
+take boat dude off(0.5 0.5 0)
+end`);
+  assert.deepEqual(b.errors, []);
+  assert.equal(b.objects.find((o) => o.name === "dude").possession.intervals[0].t0, 1);
+  // the HOLDER mid-walk never lifts a declared instant — airdrop preserved
+  const air = compile(`box plane size(3 1 2) at(0 0 6)
+box crate size(0.5 0.5 0.5) at(0 0 8)
+take plane crate at(0)
+at 5
+walk plane to(0 -20) over(10)
+end
+at 8
+drop plane crate
+end`);
+  assert.deepEqual(air.errors, []);
+  assert.equal(air.objects.find((o) => o.name === "crate").possession.drops[0].t, 8);
+});
+
+// --------------------------------------------------------------- on query
+
+test("on(a b): resting is true, hovering and transit are not — the Hanoi gate", () => {
+  const c = compile(`box big size(1.2 0.3 1.2)
+box small size(0.6 0.3 0.6) on(big)
+box hover size(0.6 0.3 0.6) above(big 1)
+? on(small big)
+? on(big small)
+? on(hover big)`);
+  assert.deepEqual(c.errors, []);
+  assert.deepEqual(c.results.map((r) => r.value), [true, false, false]);
+  // a large disk SLIDING OVER a small one mid-move must not trigger
+  const t = compile(`box disk_1 size(0.6 0.2 0.6) at(4 0.1 0)
+box disk_3 size(1.4 0.2 1.4) at(-4 2 0)
+move disk_3 by(8 0 0) over(2)
+check never on(disk_3 disk_1)`);
+  assert.deepEqual(t.errors, []); // flyover: never triggers
+  // but actually STACKING large-on-small goes red
+  const bad = compile(`box disk_1 size(0.6 0.2 0.6) at(0 0.1 0)
+box disk_3 size(1.4 0.2 1.4) on(disk_1)
+check never on(disk_3 disk_1)`);
+  assert.match(bad.errors[0].msg, /never on\(disk_3, disk_1\) → false/);
 });
 
 // ----------------------------------------------- examples are fixtures too

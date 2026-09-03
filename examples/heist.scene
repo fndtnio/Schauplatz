@@ -1,0 +1,73 @@
+/*
+THE GALLERY HEIST — the mystery, inverted.
+
+Every other case file here asks "who did it?" This one asks "CAN it
+be done?" — and the engine referees. The plan is a timeline: wait for
+the patrol gap, cross the gallery, lift the gem, get out. The checks
+below are the stealth contract, and they gate: tighten a guard's
+patrol by two minutes and `check never sees(guard_b thief)` goes red
+at the exact instant the plan dies (try it — move guard_b's return
+from 2:19 to 2:17). A heist that survives the compiler is a heist
+that survives the museum.
+
+Everything on display is load-bearing: the case is GLASS (the gem is
+visible to every witness and still honestly inside — seen is not
+touched), the lions are animals standing very still, the gem rides
+POCKETED after the strike (concealed by the thief's body — a guard
+who glimpsed him would still not see the loot), and the camera tells
+the whole thing, first person included.
+*/
+
+theme noir
+clock 2:00 minute(1)
+time strike 2:17
+
+room gallery size(11 3.5 6) door(to entrance) color(#3a3d47)
+room entrance size(4 3 3) south-of(gallery)
+room west_wing size(4 3 4) west-of(gallery) door(to gallery) color(#33363f)
+room east_wing size(4 3 4) east-of(gallery) door(to gallery) color(#33363f)
+room street size(7 3 3) south-of(entrance) walls(0) color(#22242c)
+
+room case size(1.1 1.9 1.1) at(gallery 0 -1.5) glass color(#b8d0e0)
+box pedestal size(0.4 0.8 0.4) at(case) color(#5a5d66)
+sphere gem r(0.16) on(pedestal) color(#3fd0a4)
+
+animal lion_a h(1.1) at(gallery -4 1.6) color(#8a8d94)
+animal lion_b h(1.1) at(gallery 4 1.6) color(#8a8d94)
+
+person guard_a at(gallery -3 0) color(#3d4a6b)
+person guard_b at(gallery 3 0) color(#3d4a6b)
+person thief at(street 0 0) color(#1d1f26)
+
+// the patrol: each guard checks a wing; both are out 2:15-2:19.
+// That gap IS the heist — nobody planned it, the schedules just
+// happen to overlap, which is how real security fails.
+walk guard_a to(west_wing -1 1.2) over(1m) start(2:13)
+walk guard_a to(gallery -3 0) over(1m) start(2:20)
+walk guard_b to(east_wing 1 1.4) over(1m) start(2:14)
+walk guard_b to(gallery 3 0) over(1m) start(2:19)
+
+// the plan
+walk thief to(entrance) over(1m) start(2:13)
+walk thief to(gallery 0 1.5) over(1m) start(2:15)
+walk thief to(case 0 1) over(0.5m)
+take thief gem at(strike)
+walk thief to(entrance) over(1m) start(2:18)
+walk thief to(street) over(1m)
+
+// ---- the stealth contract: these GATE the plan ----------------------
+check never sees(guard_a thief)
+check never sees(guard_b thief)
+check ever carries(thief gem)
+check always in(gem case) during(2:00 2:16)
+
+// ---- the derived story ----------------------------------------------
+? when in(thief gallery)
+? when carries(thief gem)
+?- has(thief, gem, T0, T1)
+
+// ---- the telling ----------------------------------------------------
+camera to(0 8 13) over(0) look(gallery)
+camera to(gallery 0 1.7 2.6) start(2:05) over(4m) ease(in-out) look(case)
+camera from(thief) start(2:13)
+camera to(6 4 9) start(2:19) over(2m) ease(out) look(case)

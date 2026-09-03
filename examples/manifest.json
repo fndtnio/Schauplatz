@@ -12,6 +12,8 @@
   "traffic-light.scene",
   "rooms.scene",
   "coins.scene",
+  "hanoi.scene",
+  "river-crossing.scene",
   "parts.scene",
   "mystery-room.scene",
   "arctic-base.scene",
@@ -22,10 +24,13 @@
   "storeroom.scene",
   "zebra.scene",
   "locked-manor.scene",
+  "heist.scene",
   "prolog-1-facts.scene",
   "prolog-2-rules.scene",
   "prolog-4-circuits.scene",
+  "prolog-5-planning.scene",
   "template-murdle.scene",
   "template-murdle-liars.scene",
-  "template-mystery.scene"
+  "template-mystery.scene",
+  "template-cabin.scene"
 ]
